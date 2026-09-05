@@ -490,6 +490,9 @@
         el.card.querySelector('.confirm').innerHTML =
           '<div class="confirm-done">' + esc(line) + '</div>';
         caption(esc(line));
+
+        // If this approval was what stopped an agent run, pick the run back up.
+        if (card.confirm.resume) { runAgent('', card.confirm.resume); return; }
         if (!muted) speak(line);
       };
       el.card.querySelector('.confirm-yes').addEventListener('click', function () { decide(true); });
@@ -884,6 +887,61 @@
         b.textContent = 'Reindex';
       }
     });
+  });
+
+  /* ------------------------------------------------------- agent runs */
+  /* A job rather than a question: she plans, acts, looks at what happened,
+     and goes again. A step that needs approval stops the whole run. */
+  async function runAgent(goal, resumeId) {
+    setState('thinking');
+    caption('<span class="you">' + esc(goal) + '</span> — working…');
+    let r;
+    try {
+      r = resumeId
+        ? await json('/api/agent/resume', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: resumeId })
+          })
+        : await json('/api/agent', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ goal: goal })
+          });
+    } catch (e) {
+      caption('That job failed: ' + esc(e.message), 'err');
+      toast('Agent failed: ' + e.message, 'bad', 9000);
+      resumeListening();
+      return;
+    }
+
+    showCard({
+      title: 'agent · ' + r.status,
+      subtitle: r.goal,
+      note: r.status === 'waiting'
+        ? 'The run is stopped here. It continues only if you approve it.'
+        : (r.steps.length + ' step' + (r.steps.length === 1 ? '' : 's') +
+           ' · every action was logged to audit/actions.jsonl'),
+      confirm: r.pending
+        ? { token: r.pending.token, summary: r.pending.summary, resume: r.id }
+        : null,
+      items: (r.steps || []).map(function (s) {
+        return { title: s.n + '. ' + s.tool, subtitle: s.thought, meta: s.observation };
+      })
+    });
+
+    caption(esc(r.say));
+    if (!muted) await speak(r.say); else resumeListening();
+  }
+
+  document.querySelector('[data-act="agent"]').addEventListener('click', function () {
+    const goal = el.ask.value.trim();
+    if (!goal) {
+      toast('Type the job first — “find every note where I argued about pricing ' +
+            'and write me one page” — then press Do it.', 'warn', 7000);
+      el.ask.focus();
+      return;
+    }
+    el.ask.value = '';
+    runAgent(goal);
   });
 
   document.querySelector('[data-act="memory"]').addEventListener('click', async function () {

@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import actions, data, llm, memory, tools, voice
+from . import actions, agents, data, llm, memory, tools, voice
 from . import vault as vault_mod
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,7 +51,7 @@ ORDINAL_RE = re.compile(
 # system prompt
 # --------------------------------------------------------------------------
 
-def system_prompt(v):
+def system_prompt(v, question=""):
     parts = []
     prompt_path = Path(__file__).parent / "prompt.md"
     if prompt_path.exists():
@@ -60,9 +60,12 @@ def system_prompt(v):
     if claude_md.exists():
         parts.append("\n\n# Who Aviral is (CLAUDE.md, loaded every session)\n\n"
                      + claude_md.read_text(encoding="utf-8"))
-    mems = memory.as_context()
+    # Retrieved against this question, not the last two dozen written. What he
+    # said in March about pricing should surface when he asks about pricing,
+    # not only while it happens to be recent.
+    mems = memory.as_context(question=question)
     if mems:
-        parts.append("\n\n# Things you were asked to remember\n\n" + mems)
+        parts.append("\n\n# What you remember that bears on this\n\n" + mems)
     parts.append(
         "\n\n# The state of his files right now\n\n"
         "- mode: %s\n- documents indexed: %d\n- links between them: %d\n- types: %s\n"
@@ -127,7 +130,7 @@ def _model_turn(v, question, route_hint):
     st = llm.probe()
     if not st["ok"]:
         return None
-    system = system_prompt(v)
+    system = system_prompt(v, question)
     if st["backend"] == "ollama":
         system += (
             "\n\n# Output format\n\nReply with JSON only: "
@@ -423,6 +426,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._fail(400, "No approval token given.")
             return self._send(200, actions.confirm(
                 token, approved=bool(payload.get("approved"))))
+
+        if path == "/api/agent":
+            payload = self._json_body()
+            goal = payload.get("goal", "")
+            if not goal.strip():
+                return self._fail(400, "No goal given.")
+            return self._send(200, agents.start(goal, vault_mod.get()))
+
+        if path == "/api/agent/resume":
+            payload = self._json_body()
+            run_id = payload.get("id", "")
+            if not run_id:
+                return self._fail(400, "No run id given.")
+            return self._send(200, agents.resume(run_id, vault_mod.get()))
 
         if path == "/api/reindex":
             v = vault_mod.get(refresh=True)

@@ -582,19 +582,25 @@
   let speechSeen = false, quietSince = 0, turnStart = 0;
 
   async function ensureMic() {
+    console.log('[Aeris] ensureMic called, stream exists:', !!stream);
     if (stream) return true;
+    console.log('[Aeris] checking mediaDevices API...');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.log('[Aeris] No mediaDevices API available');
       caption('This browser exposes no microphone API. Type instead.', 'err');
       toast('No microphone API in this browser.', 'bad', 12000);
       setState('error'); return false;
     }
     try {
+      console.log('[Aeris] requesting microphone access...');
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
+      console.log('[Aeris] microphone access granted, stream:', stream);
     } catch (e) {
       // A blocked mic that produces no error is the single most confusing
       // failure in this build, so say exactly what happened.
+      console.log('[Aeris] getUserMedia error:', e.name, e.message);
       const why = {
         NotAllowedError: 'You (or the browser) denied microphone access. Click the padlock in ' +
                          'the address bar and allow the microphone for localhost.',
@@ -608,12 +614,14 @@
       setState('error');
       return false;
     }
+    console.log('[Aeris] creating audio context...');
     inCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = inCtx.createMediaStreamSource(stream);
     analyser = inCtx.createAnalyser();
     analyser.fftSize = 1024;
     src.connect(analyser);
     inBuf = new Uint8Array(analyser.fftSize);
+    console.log('[Aeris] audio context ready');
     return true;
   }
 
@@ -721,14 +729,19 @@
   }
 
   async function toggleMic() {
-    if (state === 'speaking') { stopSpeaking(); return; }      // barge-in
+    console.log('[Aeris] toggleMic called, state:', state, 'continuous:', continuous);
+    if (state === 'speaking') { console.log('[Aeris] stopping speaker'); stopSpeaking(); return; }      // barge-in
     if (continuous) {
+      console.log('[Aeris] turning off continuous mic');
       continuous = false; disarmRecorder(); setState('idle'); caption('');
       return;
     }
-    if (!(await ensureMic())) return;
+    console.log('[Aeris] ensuring mic access...');
+    if (!(await ensureMic())) { console.log('[Aeris] ensureMic failed'); return; }
+    console.log('[Aeris] mic access granted, resuming audio context if needed');
     if (inCtx && inCtx.state === 'suspended') await inCtx.resume();
     continuous = true;
+    console.log('[Aeris] arming recorder');
     armRecorder();
     toast('Mic on. Just talk — I end your turn after ' + SILENCE_HANG_MS +
           'ms of quiet. Space or Esc to cut me off.', 'ok', 7000);

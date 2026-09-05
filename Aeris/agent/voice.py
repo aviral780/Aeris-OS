@@ -19,6 +19,10 @@ call rather than quietly spending more of Aviral's credit.
 import json
 import mimetypes
 import os
+import platform
+import shutil
+import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -103,24 +107,209 @@ def _http(req):
 
 
 # --------------------------------------------------------------------------
+# the free local backends
+#
+# ElevenLabs is the only metered thing left in Aeris, so both directions have
+# a local equivalent that costs nothing: macOS's own speech synthesiser for
+# speech out, whisper.cpp for speech in. `auto` picks the free one when it is
+# installed, because free is the default Aviral asked for — set AERIS_TTS or
+# AERIS_STT to `elevenlabs` when the difference in quality is worth paying for.
+# --------------------------------------------------------------------------
+
+SUBPROCESS_TIMEOUT = 120
+
+
+def _is_mac():
+    return platform.system() == "Darwin"
+
+
+def _macos_say_available():
+    return _is_mac() and bool(shutil.which("say"))
+
+
+def _whisper_bin():
+    configured_bin = data.env("WHISPER_BIN", "").strip()
+    if configured_bin:
+        return shutil.which(configured_bin) or (configured_bin
+                                                if os.path.isfile(configured_bin) else None)
+    # whisper.cpp renamed its binary; accept either, and the Python CLI too.
+    for name in ("whisper-cli", "whisper-cpp", "whisper"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _whisper_model():
+    path = data.env("WHISPER_MODEL", "").strip()
+    return path if path and os.path.isfile(os.path.expanduser(path)) else ""
+
+
+def tts_backend():
+    """Which voice actually speaks, and whether it costs anything."""
+    want = data.env("AERIS_TTS", "auto").strip().lower()
+    if want == "off":
+        return {"name": "off", "free": True, "ok": False,
+                "detail": "Speech out is switched off (AERIS_TTS=off). Text still works."}
+    mac = {"name": "macos", "free": True, "ok": True,
+           "detail": "macOS speech synthesis — free, local, nothing leaves the machine."}
+    eleven = {"name": "elevenlabs", "free": False, "ok": True,
+              "detail": "ElevenLabs — metered, billed per character."}
+    if want == "macos":
+        return mac if _macos_say_available() else {
+            "name": "macos", "free": True, "ok": False,
+            "detail": "AERIS_TTS=macos but the `say` command is not available here."}
+    if want == "elevenlabs":
+        return eleven if configured() else {
+            "name": "elevenlabs", "free": False, "ok": False,
+            "detail": "AERIS_TTS=elevenlabs but no ELEVENLABS_API_KEY is set."}
+    if _macos_say_available():
+        return mac
+    if configured():
+        return eleven
+    return {"name": "none", "free": True, "ok": False,
+            "detail": "No speech out available. On a Mac this works with no setup; "
+                      "elsewhere set ELEVENLABS_API_KEY in Aeris/.env."}
+
+
+def stt_backend():
+    want = data.env("AERIS_STT", "auto").strip().lower()
+    if want == "off":
+        return {"name": "off", "free": True, "ok": False,
+                "detail": "Speech in is switched off (AERIS_STT=off). Type instead."}
+    binary, model, ffmpeg = _whisper_bin(), _whisper_model(), shutil.which("ffmpeg")
+    whisper_ok = bool(binary and model and ffmpeg)
+    missing = ", ".join(n for n, present in
+                        (("a whisper binary", binary), ("WHISPER_MODEL", model),
+                         ("ffmpeg", ffmpeg)) if not present)
+    whisper = {"name": "whisper", "free": True, "ok": whisper_ok,
+               "detail": ("whisper.cpp — free, local, nothing leaves the machine."
+                          if whisper_ok else "Local whisper needs %s." % missing)}
+    eleven = {"name": "elevenlabs", "free": False, "ok": True,
+              "detail": "ElevenLabs Scribe — metered."}
+    if want == "whisper":
+        return whisper
+    if want == "elevenlabs":
+        return eleven if configured() else {
+            "name": "elevenlabs", "free": False, "ok": False,
+            "detail": "AERIS_STT=elevenlabs but no ELEVENLABS_API_KEY is set."}
+    if whisper_ok:
+        return whisper
+    if configured():
+        return eleven
+    return {"name": "none", "free": True, "ok": False,
+            "detail": "No speech in available. Install whisper.cpp and ffmpeg for the "
+                      "free route, or set ELEVENLABS_API_KEY. Typing always works."}
+
+
+def _tts_macos(text):
+    """`say` straight to a WAV every browser can play. Costs nothing."""
+    voice = data.env("MACOS_VOICE", "Samantha").strip()
+    rate = data.env("MACOS_RATE", "").strip()
+    with tempfile.TemporaryDirectory(prefix="aeris-tts-") as tmp:
+        out = os.path.join(tmp, "say.wav")
+        argv = ["say", "-o", out, "--data-format=LEI16@22050"]
+        if voice:
+            argv += ["-v", voice]
+        if rate:
+            argv += ["-r", rate]
+        argv.append(text)
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=SUBPROCESS_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, "", "macOS `say` failed: %s" % exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip()[:200]
+            if "Voice" in detail or "voice" in detail:
+                detail += (" — set MACOS_VOICE in Aeris/.env to one from `say -v ?`.")
+            return None, "", "macOS `say` exited %d. %s" % (proc.returncode, detail)
+        if not os.path.isfile(out):
+            return None, "", "macOS `say` produced no audio."
+        with open(out, "rb") as fh:
+            return fh.read(), "audio/wav", None
+
+
+def _stt_whisper(audio, content_type):
+    """whisper.cpp, locally, for nothing.
+
+    The browser records webm/opus, which whisper cannot read, so ffmpeg
+    converts to the 16 kHz mono WAV it wants. Both are one-time installs and
+    the status endpoint says plainly when either is missing.
+    """
+    binary, model = _whisper_bin(), _whisper_model()
+    if not binary or not model:
+        return None, "Local whisper is not set up. Install it, or set AERIS_STT=elevenlabs."
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None, "ffmpeg is needed to decode the recording. `brew install ffmpeg`."
+
+    with tempfile.TemporaryDirectory(prefix="aeris-stt-") as tmp:
+        raw = os.path.join(tmp, "turn.bin")
+        wav = os.path.join(tmp, "turn.wav")
+        with open(raw, "wb") as fh:
+            fh.write(audio)
+        try:
+            conv = subprocess.run(
+                [ffmpeg, "-nostdin", "-loglevel", "error", "-i", raw,
+                 "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav],
+                capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, "ffmpeg failed: %s" % exc
+        if conv.returncode != 0 or not os.path.isfile(wav):
+            return None, "ffmpeg could not decode that recording: %s" % (
+                (conv.stderr or "").strip()[:200])
+
+        stem = os.path.join(tmp, "out")
+        argv = [binary, "-m", os.path.expanduser(model), "-f", wav,
+                "-otxt", "-of", stem, "-nt"]
+        lang = data.env("WHISPER_LANGUAGE", "").strip()
+        if lang:
+            argv += ["-l", lang]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=SUBPROCESS_TIMEOUT, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, "whisper failed: %s" % exc
+        if proc.returncode != 0:
+            return None, "whisper exited %d: %s" % (
+                proc.returncode, (proc.stderr or "").strip()[:200])
+        transcript = stem + ".txt"
+        if not os.path.isfile(transcript):
+            return None, "whisper produced no transcript."
+        with open(transcript, encoding="utf-8", errors="replace") as fh:
+            return " ".join(fh.read().split()), None
+
+
+# --------------------------------------------------------------------------
 # speech out
 # --------------------------------------------------------------------------
 
 def speak(text):
-    """Return (mp3_bytes, error). Never raises."""
+    """Return (audio_bytes, content_type, error). Never raises."""
     text = " ".join((text or "").split())
     if not text:
-        return None, "Nothing to say."
+        return None, "", "Nothing to say."
+
+    chosen = tts_backend()
+    if not chosen["ok"]:
+        return None, "", chosen["detail"]
+    if chosen["name"] == "macos":
+        if len(text) > MAX_TTS_CHARS:
+            text = text[:MAX_TTS_CHARS].rsplit(" ", 1)[0] + "…"
+        return _tts_macos(text)
+
     if not configured():
-        return None, ("No ElevenLabs key is set, so Aeris has no voice. "
-                      "Add ELEVENLABS_API_KEY to Aeris/.env. Text still works.")
+        return None, "", ("No ElevenLabs key is set, so Aeris has no voice. "
+                          "Add ELEVENLABS_API_KEY to Aeris/.env. Text still works.")
     if len(text) > MAX_TTS_CHARS:
         text = text[:MAX_TTS_CHARS].rsplit(" ", 1)[0] + "…"
     if _spent["chars"] + len(text) > BUDGET_CHARS:
         _spent["budget_hit"] = True
-        return None, ("Speech budget for this session is used up (%d characters). "
-                      "Nothing more will be spent without you saying so — restart Aeris "
-                      "or raise BUDGET_CHARS in agent/voice.py." % BUDGET_CHARS)
+        return None, "", ("Speech budget for this session is used up (%d characters). "
+                          "Nothing more will be spent without you saying so — set "
+                          "AERIS_TTS=macos for the free voice, or raise BUDGET_CHARS."
+                          % BUDGET_CHARS)
 
     payload = {
         "text": text,
@@ -134,12 +323,12 @@ def speak(text):
                  "Accept": "audio/mpeg"})
     body, ctype, err = _http(req)
     if err:
-        return None, err
+        return None, "", err
     if not body:
-        return None, "ElevenLabs returned no audio."
+        return None, "", "ElevenLabs returned no audio."
     _spent["chars"] += len(text)
     _spent["tts_calls"] += 1
-    return body, None
+    return body, "audio/mpeg", None
 
 
 # --------------------------------------------------------------------------
@@ -168,11 +357,18 @@ def transcribe(audio, content_type="audio/webm"):
     """Return (transcript, error). Never raises."""
     if not audio:
         return None, "No audio arrived at the server."
+    if len(audio) < 1200:
+        return None, "That recording was too short to transcribe."
+
+    chosen = stt_backend()
+    if not chosen["ok"]:
+        return None, chosen["detail"]
+    if chosen["name"] == "whisper":
+        return _stt_whisper(audio, content_type)
+
     if not configured():
         return None, ("No ElevenLabs key is set, so speech-to-text is unavailable. "
                       "Add ELEVENLABS_API_KEY to Aeris/.env, or type instead.")
-    if len(audio) < 1200:
-        return None, "That recording was too short to transcribe."
 
     base = (content_type or "audio/webm").split(";")[0].strip()
     ext = mimetypes.guess_extension(base) or ".webm"
@@ -282,7 +478,7 @@ def check():
     print("  selected  : %s" % (
         "%s (%s %s)" % (current["name"], current.get("gender", ""), current.get("accent", ""))
         if current else "voice id not in this account — pick another with /api/voices"))
-    audio, err = speak("Aviral, SIR. Voice check complete.")
+    audio, _ctype, err = speak("Aviral, SIR. Voice check complete.")
     if err:
         print("  speak     : FAILED — %s" % err)
         return 1

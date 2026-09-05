@@ -445,6 +445,16 @@
         'followed:<br>' + card.injection.map(function (i) {
           return esc(i.file) + ': “' + esc(i.line) + '”'; }).join('<br>') + '</div>';
     }
+    if (card.confirm) {
+      h += '<div class="confirm">' +
+           '<div class="confirm-q">' + esc(card.confirm.summary) + '</div>' +
+           '<div class="confirm-row">' +
+             '<button class="confirm-yes">Do it</button>' +
+             '<button class="confirm-no">No</button>' +
+           '</div>' +
+           '<div class="confirm-note">Nothing has happened yet.</div>' +
+           '</div>';
+    }
     h += renderItems(card.items);
     if (card.own && card.own.length) {
       h += '<div class="hr"></div><div class="eyebrow">' +
@@ -461,6 +471,30 @@
     el.card.querySelectorAll('.item[data-id]').forEach(function (it) {
       it.addEventListener('click', function () { Graph.focus(it.dataset.id); });
     });
+
+    if (card.confirm) {
+      const decide = async function (approved) {
+        el.card.querySelectorAll('.confirm button').forEach(function (b) { b.disabled = true; });
+        let r;
+        try {
+          r = await json('/api/confirm', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: card.confirm.token, approved: approved })
+          });
+        } catch (e) { toast('Could not send that decision: ' + e.message, 'bad', 9000); return; }
+
+        const res = r.result || {};
+        const line = r.status === 'denied' ? 'Not done. You said no.'
+                   : r.status === 'expired' ? r.summary
+                   : (res.summary || 'Done.');
+        el.card.querySelector('.confirm').innerHTML =
+          '<div class="confirm-done">' + esc(line) + '</div>';
+        caption(esc(line));
+        if (!muted) speak(line);
+      };
+      el.card.querySelector('.confirm-yes').addEventListener('click', function () { decide(true); });
+      el.card.querySelector('.confirm-no').addEventListener('click', function () { decide(false); });
+    }
   }
 
   function renderItems(items) {

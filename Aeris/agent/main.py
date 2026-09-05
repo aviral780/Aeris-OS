@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import data, llm, memory, tools, voice
+from . import actions, data, llm, memory, tools, voice
 from . import vault as vault_mod
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -227,7 +227,14 @@ def handle_turn(question):
 def status_payload():
     v = vault_mod.get()
     st = llm.probe()
-    ok_voice = voice.configured()
+    tts, stt = voice.tts_backend(), voice.stt_backend()
+    ok_voice = tts["ok"] or stt["ok"]
+    # What is actually metered right now. Aeris is free unless one of these
+    # three is the paid option, so the badge can say so without hedging.
+    metered = [n for n, b in (("speech out", tts), ("speech in", stt)) if b["ok"]
+               and not b["free"]]
+    if st["ok"] and not st.get("free", True):
+        metered.append("the model")
     return {
         "mode": data.mode_label(),
         "demo": data.is_demo(),
@@ -237,10 +244,20 @@ def status_payload():
         "roots": v.roots,
         "warnings": v.warnings,
         "model": {"ok": st["ok"], "backend": st["backend"], "name": st.get("model", ""),
-                  "detail": st.get("detail", "")},
-        "voice": {"ok": ok_voice, "voice_id": voice.voice_id() if ok_voice else "",
-                  "detail": "" if ok_voice else
-                            "No ELEVENLABS_API_KEY in Aeris/.env — speech is off, text works."},
+                  "detail": st.get("detail", ""), "free": st.get("free", True),
+                  "available": st.get("available", [])},
+        "voice": {"ok": ok_voice,
+                  "voice_id": voice.voice_id() if tts["name"] == "elevenlabs" else "",
+                  "tts": tts, "stt": stt,
+                  "detail": "%s %s" % (tts["detail"], stt["detail"])
+                            if ok_voice else
+                            "No speech backend available — text still works. %s %s"
+                            % (tts["detail"], stt["detail"])},
+        "cost": {"free": not metered, "metered": metered,
+                 "detail": "Nothing here is billed per use."
+                           if not metered else
+                           "Metered: %s. Everything else is free." % ", ".join(metered)},
+        "actions": actions.status(),
         "usage": voice.usage(),
         "turn": STATE["turn"],
         "server_time": datetime.now().isoformat(timespec="seconds"),
@@ -356,6 +373,10 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/memory":
             return self._send(200, {"items": memory.all_memories(), "count": memory.count()})
+        if path == "/api/audit":
+            return self._send(200, {"items": actions.audit_tail(60),
+                                    "pending": actions.pending(),
+                                    "status": actions.status()})
         if path == "/api/voices":
             vs, err = voice.voices()
             return self._fail(502, err) if err else self._send(200, {"voices": vs})
@@ -368,10 +389,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/speak":
             payload = self._json_body()
-            audio, err = voice.speak(payload.get("text", ""))
+            audio, ctype, err = voice.speak(payload.get("text", ""))
             if err:
                 return self._fail(503, err)
-            return self._send(200, audio, "audio/mpeg")
+            return self._send(200, audio, ctype or "audio/mpeg")
 
         if path == "/api/listen":
             audio = self._body()
@@ -386,6 +407,22 @@ class Handler(BaseHTTPRequestHandler):
             ok, detail = voice.set_voice(payload.get("id", ""))
             return self._send(200, {"ok": ok, "voice_id": detail}) if ok \
                 else self._fail(400, detail)
+
+        if path == "/api/act":
+            payload = self._json_body()
+            name = payload.get("action", "")
+            if not name:
+                return self._fail(400, "No action named.")
+            return self._send(200, actions.propose(
+                name, payload.get("args") or {}, reason=payload.get("reason", "")))
+
+        if path == "/api/confirm":
+            payload = self._json_body()
+            token = payload.get("token", "")
+            if not token:
+                return self._fail(400, "No approval token given.")
+            return self._send(200, actions.confirm(
+                token, approved=bool(payload.get("approved"))))
 
         if path == "/api/reindex":
             v = vault_mod.get(refresh=True)
@@ -424,8 +461,17 @@ def banner(v, port):
     print("  hubs      %s" % ", ".join(h["title"] for h in v.top_hubs(4)))
     print("  memory    %d remembered %s" % (memory.count(),
                                             "fact" if memory.count() == 1 else "facts"))
-    print("  voice     %s" % ("ElevenLabs, voice %s" % voice.voice_id()
-                              if voice.configured() else "\033[93mno key — text only\033[0m"))
+    tts, stt = voice.tts_backend(), voice.stt_backend()
+    print("  voice     out %s%s · in %s%s" % (
+        tts["name"], "" if tts["ok"] else " \033[93m(unavailable)\033[0m",
+        stt["name"], "" if stt["ok"] else " \033[93m(unavailable)\033[0m"))
+    paid = [n for n, b in (("speech out", tts), ("speech in", stt))
+            if b["ok"] and not b["free"]] + ([] if st.get("free", True) else ["model"])
+    print("  cost      %s" % ("\033[92mfree — nothing is billed per use\033[0m" if not paid
+                              else "\033[93mmetered: %s\033[0m" % ", ".join(paid)))
+    roots = actions.write_roots()
+    print("  hands     %s" % ("can write in %s" % ", ".join(str(r) for r in roots)
+                              if roots else "\033[93mread-only — set AERIS_WRITE_ROOTS\033[0m"))
     print("  model     %s" % ("%s (%s)" % (st["model"], st["detail"]) if st["ok"]
                               else "\033[93mnone — routing by file scoring\033[0m"))
     for warn in v.warnings:

@@ -14,6 +14,8 @@ point of the badge in the top right.
 import json
 import random
 import re
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -32,6 +34,17 @@ BANNED_OPENERS = [
 # --------------------------------------------------------------------------
 
 _STATUS = None
+_BACKENDS = None
+
+CLI_TIMEOUT = 180
+
+# Which backend answers which kind of turn. Latency is the only thing being
+# traded here, not money: Ollama and the Claude CLI are both free, the CLI is
+# slower but far sharper, so trivia goes local and thinking goes to Claude.
+TIERS = {
+    "fast": ["ollama", "claude_cli", "anthropic"],
+    "deep": ["claude_cli", "anthropic", "ollama"],
+}
 
 
 def _post(url, payload, headers, timeout=TIMEOUT):
@@ -42,47 +55,107 @@ def _post(url, payload, headers, timeout=TIMEOUT):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def probe(refresh=False):
-    """Which backend, if any. Cached — a probe per turn would be silly."""
-    global _STATUS
-    if _STATUS is not None and not refresh:
-        return _STATUS
+def _try_ollama():
+    url = data.env("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    try:
+        with urllib.request.urlopen(url + "/api/tags", timeout=2.5) as resp:
+            tags = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:                                       # noqa: BLE001
+        return None, "Ollama not reachable at %s (%s)" % (url, type(exc).__name__)
+    names = [m.get("name", "") for m in tags.get("models", [])]
+    if not names:
+        return None, "Ollama is up but has no models pulled."
+    want_model = data.env("OLLAMA_MODEL", "llama3.1")
+    chosen = next((n for n in names if n.startswith(want_model)), names[0])
+    return {"backend": "ollama", "model": chosen, "url": url,
+            "detail": "local and free — nothing leaves the machine", "ok": True}, ""
+
+
+def _try_claude_cli():
+    """Claude through the CLI Aviral already pays a flat fee for.
+
+    This is the difference between free and metered. ANTHROPIC_API_KEY is
+    separate, per-token billing; `claude -p` runs on the subscription, so the
+    marginal cost of a turn is zero. Tools and MCP are switched off — Aeris
+    wants sentences back, not an agent with its own hands.
+    """
+    binary = data.env("CLAUDE_CLI", "claude").strip() or "claude"
+    path = shutil.which(binary)
+    if not path:
+        return None, "The claude CLI is not on PATH."
+    try:
+        proc = subprocess.run([path, "--version"], capture_output=True, text=True,
+                              timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, "claude CLI would not start (%s)." % type(exc).__name__
+    if proc.returncode != 0:
+        return None, "claude CLI returned %d for --version." % proc.returncode
+    return {"backend": "claude_cli", "model": data.env("CLAUDE_CLI_MODEL", "").strip(),
+            "path": path, "version": (proc.stdout or "").strip()[:40],
+            "detail": "free — runs on your Claude subscription, not the metered API",
+            "ok": True}, ""
+
+
+def _try_anthropic():
+    key = data.env("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        return None, "No ANTHROPIC_API_KEY set."
+    return {"backend": "anthropic", "model": data.env("ANTHROPIC_MODEL", "claude-sonnet-5"),
+            "key": key, "detail": "PAID — billed per token, separate from your subscription",
+            "ok": True}, ""
+
+
+_FINDERS = {"ollama": _try_ollama, "claude_cli": _try_claude_cli,
+            "anthropic": _try_anthropic}
+
+
+def backends(refresh=False):
+    """Every reachable backend, not just the first. Cached."""
+    global _BACKENDS
+    if _BACKENDS is not None and not refresh:
+        return _BACKENDS
     want = data.env("AERIS_LLM", "auto").strip().lower()
-    status = {"backend": "none", "model": "", "detail": "", "ok": False}
-
-    def try_ollama():
-        url = data.env("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-        try:
-            with urllib.request.urlopen(url + "/api/tags", timeout=2.5) as resp:
-                tags = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:                                   # noqa: BLE001
-            return None, "Ollama not reachable at %s (%s)" % (url, type(exc).__name__)
-        names = [m.get("name", "") for m in tags.get("models", [])]
-        if not names:
-            return None, "Ollama is up but has no models pulled."
-        want_model = data.env("OLLAMA_MODEL", "llama3.1")
-        chosen = next((n for n in names if n.startswith(want_model)), names[0])
-        return {"backend": "ollama", "model": chosen, "url": url,
-                "detail": "local, free", "ok": True}, ""
-
-    def try_anthropic():
-        key = data.env("ANTHROPIC_API_KEY", "").strip()
-        if not key:
-            return None, "No ANTHROPIC_API_KEY set."
-        return {"backend": "anthropic", "model": data.env("ANTHROPIC_MODEL", "claude-sonnet-5"),
-                "key": key, "detail": "paid — billed per token", "ok": True}, ""
-
-    reasons = []
-    order = {"auto": [try_ollama, try_anthropic], "ollama": [try_ollama],
-             "anthropic": [try_anthropic], "off": []}.get(want, [try_ollama, try_anthropic])
-    for fn in order:
-        got, why = fn()
+    allowed = {"auto": list(_FINDERS), "ollama": ["ollama"],
+               "claude": ["claude_cli"], "claude_cli": ["claude_cli"],
+               "anthropic": ["anthropic"], "off": []}.get(want, list(_FINDERS))
+    found, why = {}, {}
+    for name in allowed:
+        got, reason = _FINDERS[name]()
         if got:
-            status = got
-            break
-        reasons.append(why)
-    if not status["ok"]:
-        status["detail"] = " ".join(reasons) or "Model use is switched off (AERIS_LLM=off)."
+            found[name] = got
+        else:
+            why[name] = reason
+    _BACKENDS = {"found": found, "why": why, "want": want}
+    return _BACKENDS
+
+
+def for_tier(tier="fast"):
+    """The backend that should answer this kind of turn."""
+    found = backends()["found"]
+    for name in TIERS.get(tier, TIERS["fast"]):
+        if name in found:
+            return found[name]
+    return None
+
+
+def probe(refresh=False):
+    """The headline backend, for the badge in the corner."""
+    global _STATUS, _BACKENDS
+    if refresh:
+        _BACKENDS = None
+        _STATUS = None
+    if _STATUS is not None:
+        return _STATUS
+    info = backends()
+    primary = for_tier("deep") or for_tier("fast")
+    if primary:
+        free = primary["backend"] in ("ollama", "claude_cli")
+        status = dict(primary, free=free, available=sorted(info["found"]))
+    else:
+        status = {"backend": "none", "model": "", "ok": False, "free": True,
+                  "available": [],
+                  "detail": " ".join(info["why"].values())
+                            or "Model use is switched off (AERIS_LLM=off)."}
     _STATUS = status
     return status
 
@@ -120,15 +193,109 @@ TOOL_SCHEMA = [
     {"name": "plan_day",
      "description": "Up to five things to do, ordered by what moves money.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "look_at_screen",
+     "description": "Take one screenshot of Aviral's screen and describe it. Use when he "
+                    "asks what he is looking at, to read an error on screen, or to check "
+                    "something he is pointing at. Never speculate about his screen without "
+                    "calling this.",
+     "input_schema": {"type": "object", "properties": {
+         "question": {"type": "string", "description": "what to look for on the screen"}},
+         "required": []}},
+    {"name": "write_file",
+     "description": "Write or replace a file. Only works inside folders he has opted in. "
+                    "The previous version is always kept, so this is reversible.",
+     "input_schema": {"type": "object", "properties": {
+         "path": {"type": "string"}, "content": {"type": "string"}},
+         "required": ["path", "content"]}},
+    {"name": "run_command",
+     "description": "Run a command on his machine — git, tests, a build. This always stops "
+                    "and asks him first, so propose it freely when it is the right move.",
+     "input_schema": {"type": "object", "properties": {
+         "command": {"type": "string"}, "cwd": {"type": "string"}},
+         "required": ["command"]}},
 ]
 
 
-def call(system, messages, tools=None, max_tokens=700, temperature=0.6):
-    """Return (text, tool_call|None, error|None)."""
-    st = probe()
-    if not st["ok"]:
-        return None, None, st["detail"]
+def _transcript(messages):
+    """Flatten a turn list into one prompt. The CLI takes text, not roles."""
+    out = []
+    for m in messages:
+        who = "Aviral" if m.get("role") == "user" else "You"
+        out.append("%s: %s" % (who, m.get("content", "")))
+    return "\n\n".join(out)
+
+
+def _call_claude_cli(st, system, messages, tools, max_tokens):
+    """Free Claude, via the CLI, on the subscription.
+
+    The prompt goes in on stdin rather than argv: a long note pasted into a
+    question can exceed the argument limit, and stdin has no such ceiling.
+    Tools and MCP are off, so this can only ever hand back words.
+    """
+    argv = [st["path"], "-p", "--output-format", "text",
+            "--allowed-tools", "", "--strict-mcp-config"]
+    if st.get("model"):
+        argv += ["--model", st["model"]]
+    if system:
+        argv += ["--append-system-prompt", system]
+
+    prompt = _transcript(messages)
+    if tools:
+        prompt += (
+            "\n\nReply with JSON only, no prose around it: "
+            '{"tool": "<one of %s, or none>", "args": {...}, '
+            '"say": "<what you say out loud when tool is none>"}. '
+            "Most turns are conversation — use \"none\" unless a tool is "
+            "genuinely needed." % ", ".join(t["name"] for t in tools))
+
     try:
+        proc = subprocess.run(argv, input=prompt, capture_output=True, text=True,
+                              timeout=CLI_TIMEOUT, check=False, cwd="/")
+    except subprocess.TimeoutExpired:
+        return None, None, "The claude CLI did not answer within %ds." % CLI_TIMEOUT
+    except OSError as exc:
+        return None, None, "Could not run the claude CLI: %s" % exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        return None, None, "claude CLI exited %d: %s" % (proc.returncode, detail)
+
+    text = (proc.stdout or "").strip()
+    if tools:
+        return _parse_tool_json(text)
+    return text, None, None
+
+
+def _parse_tool_json(text):
+    """Both free backends answer tool turns as JSON. Parse it the same way."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        m = re.search(r"\{.*\}", text, re.S)
+        try:
+            parsed = json.loads(m.group(0)) if m else {}
+        except ValueError:
+            return text, None, None
+    if isinstance(parsed, dict) and parsed.get("tool") and parsed["tool"] != "none":
+        return (parsed.get("say") or "").strip(), \
+               {"name": parsed["tool"], "args": parsed.get("args") or {}}, None
+    if isinstance(parsed, dict):
+        return (parsed.get("say") or text).strip(), None, None
+    return text, None, None
+
+
+def call(system, messages, tools=None, max_tokens=700, temperature=0.6, tier="deep"):
+    """Return (text, tool_call|None, error|None).
+
+    `tier` picks the backend: "fast" prefers local Ollama, "deep" prefers
+    Claude. Both preferences are free.
+    """
+    st = for_tier(tier) or probe()
+    if not st or not st.get("ok"):
+        return None, None, (st or probe())["detail"]
+    try:
+        if st["backend"] == "claude_cli":
+            return _call_claude_cli(st, system, messages, tools, max_tokens)
+
         if st["backend"] == "anthropic":
             payload = {"model": st["model"], "max_tokens": max_tokens,
                        "temperature": temperature, "system": system,
@@ -153,17 +320,7 @@ def call(system, messages, tools=None, max_tokens=700, temperature=0.6):
             payload["format"] = "json"
         out = _post(st["url"] + "/api/chat", payload, {})
         text = (out.get("message") or {}).get("content", "").strip()
-        if tools:
-            try:
-                parsed = json.loads(text)
-            except ValueError:
-                m = re.search(r"\{.*\}", text, re.S)
-                parsed = json.loads(m.group(0)) if m else {}
-            if isinstance(parsed, dict) and parsed.get("tool") and parsed["tool"] != "none":
-                return (parsed.get("say") or "").strip(), \
-                       {"name": parsed["tool"], "args": parsed.get("args") or {}}, None
-            return (parsed.get("say") or text).strip() if isinstance(parsed, dict) else text, None, None
-        return text, None, None
+        return _parse_tool_json(text) if tools else (text, None, None)
     except (urllib.error.URLError, urllib.error.HTTPError, ValueError, KeyError, OSError) as exc:
         detail = getattr(exc, "reason", None) or str(exc)
         if isinstance(exc, urllib.error.HTTPError):

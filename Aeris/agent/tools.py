@@ -610,6 +610,73 @@ def plan_day(v, **_):
 
 
 # --------------------------------------------------------------------------
+# 7-9. the ones with hands
+#
+# Every one of these goes through actions.propose(), so the gate decides
+# whether it runs or waits. Nothing here reaches the disk on its own.
+# --------------------------------------------------------------------------
+
+def look_at_screen(v, question="", **_):
+    from . import actions
+    out = actions.propose("look_at_screen", {"question": question},
+                          reason="asked to look at the screen")
+    result = out.get("result") or {}
+    if not result.get("ok"):
+        return _tool("look_at_screen",
+                     "Aviral, SIR — I couldn't see the screen. %s" % result.get("summary", ""),
+                     {"title": "look_at_screen — no image",
+                      "note": result.get("summary", ""), "degraded": True})
+    return _tool("look_at_screen", "Aviral, SIR — %s" % result["summary"], {
+        "title": "look_at_screen",
+        "subtitle": "one capture, read by %s, image discarded" % result.get("read_by", "?"),
+        "rows": [{"k": "Read by", "v": "%s%s" % (result.get("read_by", ""),
+                                                 "" if result.get("free") else " (metered)")},
+                 {"k": "Kept", "v": "nothing — the screenshot is already deleted"}],
+        "note": "Captured because you asked. Aeris takes no screenshots on her own.",
+    })
+
+
+def _gated(name, args, spoken_ok, title, reason=""):
+    """Shared shape for a capability that may need approval first."""
+    from . import actions
+    out = actions.propose(name, args, reason=reason)
+    if out["status"] == "needs_confirmation":
+        return _tool(name,
+                     "Aviral, SIR — that one needs your say-so. %s. Approve it on screen."
+                     % out["summary"],
+                     {"title": "%s — waiting for you" % title,
+                      "subtitle": out["summary"],
+                      "confirm": {"token": out["token"], "summary": out["summary"]},
+                      "note": "Nothing has happened yet. It runs only if you approve it.",
+                      "rows": [{"k": "Action", "v": name},
+                               {"k": "Status", "v": "<b>waiting for your approval</b>"}]})
+    if out["status"] == "unknown":
+        return _tool(name, "I don't know that one, SIR.",
+                     {"title": "unknown action", "note": out["summary"]})
+    result = out.get("result") or {}
+    ok = result.get("ok")
+    return _tool(name,
+                 "Aviral, SIR — %s" % (spoken_ok if ok else result.get("summary", "it failed.")),
+                 {"title": title, "subtitle": result.get("summary", ""),
+                  "rows": [{"k": k, "v": str(val)[:300]}
+                           for k, val in result.items()
+                           if k in ("path", "backup", "code", "stdout", "stderr") and val],
+                  "note": "Logged to audit/actions.jsonl." if ok else "Nothing was changed.",
+                  "degraded": not ok})
+
+
+def write_file(v, path="", content="", **_):
+    return _gated("write_file", {"path": path, "content": content},
+                  "written, and the old version is kept.", "write_file",
+                  reason="asked to write a file")
+
+
+def run_command(v, command="", cwd="", **_):
+    return _gated("run_command", {"command": command, "cwd": cwd},
+                  "done.", "run_command", reason="asked to run a command")
+
+
+# --------------------------------------------------------------------------
 
 def _tool(name, spoken, card, receipt=None):
     out = {"tool": name, "spoken": spoken, "card": card}
@@ -625,6 +692,9 @@ REGISTRY = {
     "brief_me": brief_me,
     "remember": remember,
     "plan_day": plan_day,
+    "look_at_screen": look_at_screen,
+    "write_file": write_file,
+    "run_command": run_command,
 }
 
 

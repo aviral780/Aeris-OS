@@ -11,3 +11,5 @@ venv/
 Aeris/memory/*.md
 !Aeris/memory/.gitkeep
 Aeris/.cache/
+Aeris/audit/
+.aeris-backups/

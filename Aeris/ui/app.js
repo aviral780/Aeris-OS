@@ -506,9 +506,7 @@
     if (r.model_error) toast('Model call failed, fell back to scoring: ' + r.model_error, 'warn', 9000);
 
     if (!muted) await speak(r.spoken);
-    else setState(continuous ? 'listening' : 'idle');
-    if (continuous && !muted) { /* speak() resumes listening when it ends */ }
-    else if (continuous) armRecorder();
+    else { setState(continuous ? 'listening' : 'idle'); if (continuous) armRecorder(); }
   }
 
   /* ------------------------------------------------------------- speak */
@@ -569,7 +567,7 @@
     clearInterval(meter); level = 0;
     URL.revokeObjectURL(url);
     audioEl = null;
-    if (continuous) armRecorder(); else setState('idle');
+    if (continuous) { setState('listening'); armRecorder(); } else setState('idle');
   }
 
   function stopSpeaking() {

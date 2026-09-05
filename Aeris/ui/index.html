@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aeris</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='11' fill='none' stroke='%2335e0f0' stroke-width='2'/><circle cx='16' cy='16' r='4' fill='%2335e0f0'/></svg>">
+</head>
+<body>
+
+<canvas id="graph"></canvas>
+
+<div id="toolbar">
+  <button class="tool" data-act="fit">Fit</button>
+  <button class="tool on" data-act="labels">Labels</button>
+  <button class="tool on" data-act="pulse">Pulse</button>
+  <button class="tool" data-act="reload">Reindex</button>
+</div>
+
+<!-- ------------------------------------------------------------- left -->
+<aside id="left" class="panel">
+  <div class="brand-row">
+    <div>
+      <div class="brand">A<em>E</em>RIS</div>
+      <div class="brand-sub" id="brand-sub">indexing…</div>
+    </div>
+    <span class="mode-chip" id="mode-chip">…</span>
+  </div>
+
+  <input id="search" type="text" placeholder="Search the brain…" autocomplete="off" spellcheck="false">
+  <div id="results"></div>
+
+  <div class="hr"></div>
+  <div class="eyebrow">Inspector</div>
+  <div id="inspector">
+    <div class="hint">
+      Click a node to focus it — only that node and its links stay lit, and the
+      note opens here. Shift-click a second node to trace the shortest path
+      between them.
+    </div>
+  </div>
+
+  <div class="hr"></div>
+  <div class="eyebrow">Top hubs</div>
+  <div id="hubs"></div>
+</aside>
+
+<!-- ------------------------------------------------------------ right -->
+<aside id="right" class="panel">
+  <div class="eyebrow">Filter</div>
+  <div id="filters"></div>
+</aside>
+
+<div id="reactor-wrap">
+  <canvas id="reactor" width="396" height="396"></canvas>
+  <div class="reactor-state">&bull; <b id="state-label">idle</b></div>
+  <div id="badges"></div>
+</div>
+
+<!-- ----------------------------------------------------------- bottom -->
+<div id="dock">
+  <div id="caption"></div>
+
+  <div class="ask-wrap">
+    <div id="bars"><i></i><i></i><i></i><i></i><i></i></div>
+    <input id="ask" type="text" autocomplete="off" spellcheck="false" placeholder="Ask Aeris…">
+
+    <button class="iconbtn" id="btn-mic" title="Mic — click once, then just talk (Space)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="2" width="6" height="11" rx="3"/>
+        <path d="M5 10v1a7 7 0 0 0 14 0v-1M12 19v3"/>
+      </svg>
+    </button>
+
+    <button class="iconbtn" id="btn-mute" title="Mute her voice">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M11 5 6 9H2v6h4l5 4z"/>
+        <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
+        <path d="M18.5 5.5a9 9 0 0 1 0 13"/>
+      </svg>
+    </button>
+
+    <button class="iconbtn" id="btn-send" title="Send">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 12h15M13 6l6 6-6 6"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="dock-row">
+    <button class="pillbtn" data-ask="brief me">Brief</button>
+    <button class="pillbtn" data-ask="plan my day">Plan</button>
+    <button class="pillbtn" data-ask="read my inbox">Inbox</button>
+    <button class="pillbtn" data-act="memory">Memory</button>
+    <button class="pillbtn" data-act="voice">Voice</button>
+  </div>
+</div>
+
+<div id="card"></div>
+<div id="tip"></div>
+<div id="toasts"></div>
+
+<script src="/graph.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

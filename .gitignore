@@ -1,0 +1,13 @@
+# secrets — never commit
+Aeris/.env
+*.env.local
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# runtime scratch
+Aeris/memory/*.md
+!Aeris/memory/.gitkeep
+Aeris/.cache/

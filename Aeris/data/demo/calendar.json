@@ -1,0 +1,44 @@
+[
+  {
+    "date": "2026-09-05",
+    "start": "09:30",
+    "minutes": 30,
+    "title": "Northgate Credit Union \u2014 scope walkthrough"
+  },
+  {
+    "date": "2026-09-05",
+    "start": "14:00",
+    "minutes": 60,
+    "title": "Deep work: calibration fix"
+  },
+  {
+    "date": "2026-09-06",
+    "start": "11:00",
+    "minutes": 45,
+    "title": "Bluecrest Payments \u2014 legal follow-up"
+  },
+  {
+    "date": "2026-09-06",
+    "start": "16:30",
+    "minutes": 30,
+    "title": "Marwah Clinic \u2014 check-in"
+  },
+  {
+    "date": "2026-09-07",
+    "start": "10:00",
+    "minutes": 90,
+    "title": "Deep work: pricing page rewrite"
+  },
+  {
+    "date": "2026-09-08",
+    "start": "09:00",
+    "minutes": 30,
+    "title": "Weekly review"
+  },
+  {
+    "date": "2026-09-09",
+    "start": "13:00",
+    "minutes": 45,
+    "title": "Sunder Diagnostics \u2014 intro call"
+  }
+]

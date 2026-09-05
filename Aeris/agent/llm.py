@@ -235,6 +235,23 @@ TOOL_SCHEMA = [
                     "noticed.",
      "input_schema": {"type": "object", "properties": {
          "text": {"type": "string"}}, "required": ["text"]}},
+    {"name": "check_repos",
+     "description": "His GitHub: what is failing, what pull requests are open, what has "
+                    "gone quiet, and what he has actually been committing. Use for "
+                    "'what's broken', 'what am I in the middle of', 'what did I work on "
+                    "this week'. He keeps no notes, so this is the real record of his work.",
+     "input_schema": {"type": "object", "properties": {
+         "days": {"type": "integer", "description": "how far back to look, default 7"},
+         "limit": {"type": "integer", "description": "how many repos, default 8"}},
+         "required": []}},
+    {"name": "github_issue",
+     "description": "Open an issue on one of his repositories. This is visible to other "
+                    "people, so it always stops and asks him first — propose it when it "
+                    "is the right move and let him decide.",
+     "input_schema": {"type": "object", "properties": {
+         "repo": {"type": "string", "description": "owner/name"},
+         "title": {"type": "string"}, "body": {"type": "string"}},
+         "required": ["repo", "title"]}},
 ]
 
 
@@ -380,6 +397,11 @@ FOLLOWUP = re.compile(r"^\s*(why|why\?|why not|how so|and\?|so\?|go on|keep goin
                       r"|what about (the )?(first|second|third|last|other)|and that\?)\b", re.I)
 
 TOOL_CUES = [
+    # Repos before everything: "what's broken" and "what am I working on" are
+    # questions about his code, and his code is the only written record he has.
+    ("check_repos", r"\b(repos?|repositor(y|ies)|github|pull requests?|\bprs?\b|ci\b"
+                    r"|build(s| status)?|what'?s (broken|failing|red)|failing tests?"
+                    r"|what did i (commit|push|work on|build)|my (code|commits))\b"),
     # plan_day is tested before brief_me: "plan my day" contains "my day".
     ("plan_day", r"\bplan (my |the )?(day|today|week|morning)\b|\bwhat should i (do|work on|focus on|start with)\b"
                  r"|\bpriorit(y|ies|ise|ize)\b|\bmy to.?do\b|\bwhat'?s next\b|\bwhere do i start\b"),

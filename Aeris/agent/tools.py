@@ -711,6 +711,103 @@ def log_today(v, text="", **_):
                           "logged to today's note.")
 
 
+# --------------------------------------------------------------------------
+# 10. check_repos — his code, which is the record he did not write
+# --------------------------------------------------------------------------
+
+def check_repos(v, days=7, limit=8, **_):
+    from . import github
+    if not github.configured():
+        return _tool("check_repos",
+                     "Aviral, SIR — no GitHub token is set, so I can't see your repos.",
+                     {"title": "check_repos — not connected",
+                      "note": "Add GITHUB_TOKEN to Aeris/.env. A fine-grained token with "
+                              "read access to your repositories is enough.",
+                      "degraded": True})
+
+    try:
+        days = max(1, min(90, int(days)))
+        limit = max(1, min(30, int(limit)))
+    except (TypeError, ValueError):
+        days, limit = 7, 8
+
+    out, err = github.overview(limit=limit, days=days)
+    if err:
+        return _tool("check_repos", "Aviral, SIR — GitHub wouldn't answer. %s" % err,
+                     {"title": "check_repos — failed", "note": err, "degraded": True})
+
+    failing, waiting, stale = out["failing"], out["waiting"], out["stale"]
+    active = out["active"]
+
+    items = []
+    for f in failing:
+        items.append({"title": "%s — %s" % (f["repo"], f["why"]),
+                      "subtitle": "red for %d %s" % (f["age_days"],
+                                                     _plural(f["age_days"], "day")),
+                      "url": f["url"], "meta": "failing", "flagged": True})
+    for w in waiting:
+        items.append({"title": "%s#%d — %s" % (w["repo"], w["number"], w["title"]),
+                      "subtitle": "open %d %s%s" % (w["age_days"],
+                                                    _plural(w["age_days"], "day"),
+                                                    ", draft" if w["draft"] else ""),
+                      "url": w["url"], "meta": "pull request"})
+    for s in stale:
+        items.append({"title": "%s — quiet for %d days" % (s["repo"], s["age_days"]),
+                      "subtitle": "%d open %s and no pushes"
+                                  % (s["open"], _plural(s["open"], "issue")),
+                      "url": s["url"], "meta": "stale"})
+
+    rows = [
+        {"k": "Failing", "v": ("<b>%d</b> %s red" % (len(failing),
+                                                     _plural(len(failing), "build"))
+                               if failing else "nothing red")},
+        {"k": "Open PRs", "v": ("<b>%d</b> waiting" % len(waiting)
+                                if waiting else "none open")},
+        {"k": "Stale", "v": ("<b>%d</b> %s quiet with issues open"
+                             % (len(stale), _plural(len(stale), "repo"))
+                             if stale else "nothing abandoned")},
+        {"k": "Worked on", "v": (", ".join("%s (%d)" % (a["repo"].split("/")[-1],
+                                                        a["commits"])
+                                           for a in active[:4])
+                                 if active else "no commits in %d days" % days)},
+    ]
+
+    # Ordered by what actually blocks him. A red build stops everything behind
+    # it; a stale repo has been fine for three weeks and can wait an hour.
+    if failing:
+        spoken = ("Aviral, SIR — %d %s red. Start with %s."
+                  % (len(failing), _plural(len(failing), "build"), failing[0]["repo"]))
+    elif waiting:
+        oldest = waiting[0]
+        spoken = ("Aviral, SIR — nothing is red. %d pull %s open, the oldest is %s#%d "
+                  "at %d days." % (len(waiting), _plural(len(waiting), "request"),
+                                   oldest["repo"], oldest["number"], oldest["age_days"]))
+    elif active:
+        spoken = ("Aviral, SIR — all green. %d %s in the last %d days, mostly on %s."
+                  % (sum(a["commits"] for a in active),
+                     _plural(sum(a["commits"] for a in active), "commit"),
+                     days, active[0]["repo"].split("/")[-1]))
+    else:
+        spoken = ("Aviral, SIR — all green, and nothing committed in %d days. "
+                  "Your repos are quiet." % days)
+
+    return _tool("check_repos", spoken, {
+        "title": "check_repos",
+        "subtitle": "%d %s as %s · last %d days"
+                    % (out["repos"], _plural(out["repos"], "repo"),
+                       out["me"]["login"], days),
+        "rows": rows,
+        "items": items,
+        "note": "Read-only. Opening an issue or commenting stops and asks you first.",
+    })
+
+
+def github_issue(v, repo="", title="", body="", **_):
+    return _gated("github_create_issue", {"repo": repo, "title": title, "body": body},
+                  "issue opened.", "github_create_issue",
+                  reason="asked to open a GitHub issue")
+
+
 def run_command(v, command="", cwd="", **_):
     return _gated("run_command", {"command": command, "cwd": cwd},
                   "done.", "run_command", reason="asked to run a command")
@@ -737,6 +834,8 @@ REGISTRY = {
     "run_command": run_command,
     "capture_note": capture_note,
     "log_today": log_today,
+    "check_repos": check_repos,
+    "github_issue": github_issue,
 }
 
 

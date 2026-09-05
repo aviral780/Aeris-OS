@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import actions, agents, data, llm, memory, tools, voice
+from . import actions, agents, data, github, llm, memory, tools, voice
 from . import vault as vault_mod
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -261,6 +261,7 @@ def status_payload():
                            if not metered else
                            "Metered: %s. Everything else is free." % ", ".join(metered)},
         "actions": actions.status(),
+        "github": github.status(),
         "usage": voice.usage(),
         "turn": STATE["turn"],
         "server_time": datetime.now().isoformat(timespec="seconds"),
@@ -489,6 +490,9 @@ def banner(v, port):
     roots = actions.write_roots()
     print("  hands     %s" % ("can write in %s" % ", ".join(str(r) for r in roots)
                               if roots else "\033[93mread-only — set AERIS_WRITE_ROOTS\033[0m"))
+    gh = github.status()
+    print("  github    %s" % (gh["detail"] if gh["ok"]
+                              else "\033[93m%s\033[0m" % gh["detail"]))
     print("  model     %s" % ("%s (%s)" % (st["model"], st["detail"]) if st["ok"]
                               else "\033[93mnone — routing by file scoring\033[0m"))
     for warn in v.warnings:

@@ -259,6 +259,16 @@ def _look_at_screen(question="", **_):
     return screen.look(question)
 
 
+def _github_create_issue(**args):
+    from . import github
+    return github.create_issue(**args)
+
+
+def _github_comment(**args):
+    from . import github
+    return github.comment(**args)
+
+
 # --------------------------------------------------------------------------
 # registry
 # --------------------------------------------------------------------------
@@ -294,6 +304,13 @@ register(Capability("run_command", run_command, CONFIRM,
 register(Capability("look_at_screen", _look_at_screen, LOCAL,
                     "Take one screenshot, describe it, and throw the image away. "
                     "Only ever happens because you asked."))
+# Outward. An issue filed by mistake is visible to other people and cannot be
+# quietly taken back, so neither of these ever runs without him.
+register(Capability("github_create_issue", _github_create_issue, CONFIRM,
+                    "Open an issue on GitHub. Always asks first.", outward=True))
+register(Capability("github_comment", _github_comment, CONFIRM,
+                    "Comment on a GitHub issue or pull request. Always asks first.",
+                    outward=True))
 
 
 def risk_of(name, args):
@@ -362,6 +379,11 @@ def _describe(name, args):
         return "Delete %s" % args.get("path", "")
     if name == "write_file":
         return "Write %s" % args.get("path", "")
+    if name == "github_create_issue":
+        return "Open an issue on %s: “%s”" % (args.get("repo", ""), args.get("title", ""))
+    if name == "github_comment":
+        return "Comment on %s#%s: “%s”" % (args.get("repo", ""), args.get("number", ""),
+                                           str(args.get("body", ""))[:120])
     return "%s %s" % (name, json.dumps(args, default=str)[:160])
 
 

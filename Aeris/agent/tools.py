@@ -19,6 +19,7 @@ suggestion and this is not:
   * text read out of files and mail is scanned for instructions aimed at an
     assistant, and those are reported, never followed
 """
+import html
 import inspect
 import re
 import urllib.error
@@ -671,6 +672,45 @@ def write_file(v, path="", content="", **_):
                   reason="asked to write a file")
 
 
+def _from_proposal(out, name, title, spoken_ok, extra_rows=None):
+    """Shape a capture proposal into a tool result."""
+    if out.get("status") == "needs_confirmation":
+        return _tool(name, "Aviral, SIR — that needs your say-so. %s" % out["summary"],
+                     {"title": "%s — waiting for you" % title,
+                      "confirm": {"token": out["token"], "summary": out["summary"]},
+                      "note": "Nothing written yet."})
+    result = out.get("result") or {}
+    if not result.get("ok"):
+        return _tool(name, "Aviral, SIR — I couldn't write it. %s" % result.get("summary", ""),
+                     {"title": "%s — failed" % title, "note": result.get("summary", ""),
+                      "degraded": True})
+    return _tool(name, "Aviral, SIR — %s" % spoken_ok, {
+        "title": title,
+        "subtitle": result.get("path", ""),
+        "rows": (extra_rows or []) + [
+            {"k": "File", "v": result.get("path", "")},
+            {"k": "Scope", "v": "your vault — reindex to see it in the graph"}],
+        "note": "Logged to audit/actions.jsonl. The old version is kept if there was one.",
+    })
+
+
+def capture_note(v, title="", body="", kind="note", tags=None, links=None, **_):
+    from . import capture
+    out = capture.note(title=title, body=body, kind=kind, tags=tags, links=links)
+    return _from_proposal(out, "capture_note", "capture_note",
+                          "written down as a %s." % (kind or "note"),
+                          # row.v reaches the page as raw HTML, and this title came
+                          # from a model. Escape it.
+                          extra_rows=[{"k": "Title", "v": "<b>%s</b>" % html.escape(title)}])
+
+
+def log_today(v, text="", **_):
+    from . import capture
+    out = capture.log(text)
+    return _from_proposal(out, "log_today", "log_today",
+                          "logged to today's note.")
+
+
 def run_command(v, command="", cwd="", **_):
     return _gated("run_command", {"command": command, "cwd": cwd},
                   "done.", "run_command", reason="asked to run a command")
@@ -695,6 +735,8 @@ REGISTRY = {
     "look_at_screen": look_at_screen,
     "write_file": write_file,
     "run_command": run_command,
+    "capture_note": capture_note,
+    "log_today": log_today,
 }
 
 

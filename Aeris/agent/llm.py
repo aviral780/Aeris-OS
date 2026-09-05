@@ -213,6 +213,28 @@ TOOL_SCHEMA = [
      "input_schema": {"type": "object", "properties": {
          "command": {"type": "string"}, "cwd": {"type": "string"}},
          "required": ["command"]}},
+    {"name": "capture_note",
+     "description": "Write a new note into his vault — a decision, an idea, a project, a "
+                    "person, a meeting. Use this whenever he says something worth keeping "
+                    "as its own file. He has few notes, so lean towards capturing rather "
+                    "than letting a good thought evaporate. Different from `remember`, "
+                    "which stores one short fact about him.",
+     "input_schema": {"type": "object", "properties": {
+         "title": {"type": "string"},
+         "body": {"type": "string", "description": "markdown, his words where possible"},
+         "kind": {"type": "string",
+                  "description": "note, idea, decision, project, client, person, meeting, "
+                                 "task or research"},
+         "tags": {"type": "array", "items": {"type": "string"}},
+         "links": {"type": "array", "items": {"type": "string"},
+                   "description": "titles of other notes to wikilink to"}},
+         "required": ["title", "body"]}},
+    {"name": "log_today",
+     "description": "Append one line to today's daily note. For things worth having said "
+                    "but not worth their own file — what he did, what broke, what he "
+                    "noticed.",
+     "input_schema": {"type": "object", "properties": {
+         "text": {"type": "string"}}, "required": ["text"]}},
 ]
 
 

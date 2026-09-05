@@ -19,6 +19,8 @@
   const LEAD_IN_MS       = 800;   // grace period before silence can end a turn
   const MIN_UTTERANCE_MS = 450;   // shorter than this is a cough, not a turn
   const MAX_UTTERANCE_MS = 25000; // hard stop so a stuck mic cannot run on
+  const MAX_SPEECH_MS    = 90000; // she is never allowed to hold the turn longer
+  const REARM_TICK_MS    = 1500;  // watchdog: hands-free must never die quietly
   /* =================================================================== */
 
   const $ = function (s) { return document.querySelector(s); };
@@ -36,7 +38,7 @@
   let graphData = null, status = null;
   let state = 'idle';            // idle | listening | thinking | speaking
   let muted = false, continuous = false;
-  let audioEl = null, level = 0;
+  let level = 0;
 
   const EXAMPLES = [
     'what did I write about prompt injection?',
@@ -492,9 +494,10 @@
         body: JSON.stringify({ text: text })
       });
     } catch (e) {
-      asking = false; setState('idle');
+      asking = false;
       caption('Aeris could not answer: ' + esc(e.message), 'err');
       toast('Ask failed: ' + e.message, 'bad', 9000);
+      resumeListening();                      // a failed turn still hands the mic back
       return;
     }
     asking = false;
@@ -506,14 +509,53 @@
     if (r.model_error) toast('Model call failed, fell back to scoring: ' + r.model_error, 'warn', 9000);
 
     if (!muted) await speak(r.spoken);
-    else { setState(continuous ? 'listening' : 'idle'); if (continuous) armRecorder(); }
+    else resumeListening();
   }
 
   /* ------------------------------------------------------------- speak */
-  let outCtx = null, outAnalyser = null, outSource = null;
+  /* One audio element for the life of the page. A fresh Audio() per answer
+     meant a fresh createMediaElementSource() per answer on the same context —
+     the old nodes were never released, and a stale in-flight speak() could
+     null out the element the *current* answer was still playing through. */
+  let outCtx = null, outAnalyser = null, outSource = null, outEl = null;
+  let outUrl = null, speakSeq = 0, endTurn = null;
+
+  /* Call this from a real click. An AudioContext created outside a user
+     gesture can stay suspended, and a media element routed into a suspended
+     context plays silently and never fires 'ended'. */
+  function ensureOutput() {
+    if (!outEl) {
+      outEl = new Audio();
+      outEl.preload = 'auto';
+    }
+    if (!outCtx) {
+      try {
+        outCtx = new (window.AudioContext || window.webkitAudioContext)();
+        outSource = outCtx.createMediaElementSource(outEl);
+        outAnalyser = outCtx.createAnalyser();
+        outAnalyser.fftSize = 512;
+        outSource.connect(outAnalyser);
+        outAnalyser.connect(outCtx.destination);
+      } catch (e) { outAnalyser = null; }     // plain playback still works
+    }
+    if (outCtx && outCtx.state === 'suspended') outCtx.resume().catch(function () {});
+  }
+
+  function isPlaying() {
+    return !!(outEl && !outEl.paused && !outEl.ended && outEl.currentTime > 0);
+  }
+
+  /* The single place that decides what happens when she stops talking. */
+  function resumeListening() {
+    level = 0;
+    if (continuous && stream) { setState('listening'); armRecorder(); }
+    else setState('idle');
+  }
 
   async function speak(text) {
-    if (!text) { setState('idle'); return; }
+    const mine = ++speakSeq;                  // any later call supersedes this
+    if (!text) { resumeListening(); return; }
+
     let blob;
     try {
       const res = await api('/api/speak', {
@@ -522,33 +564,25 @@
       });
       blob = await res.blob();
     } catch (e) {
-      setState(continuous ? 'listening' : 'idle');
       toast('No speech: ' + e.message, 'bad', 9000);
-      if (continuous) armRecorder();
+      if (mine === speakSeq) resumeListening();
       return;
     }
+    if (mine !== speakSeq) return;
 
     // The mic must be deaf while she talks, or she transcribes herself
     // through the speakers and talks to herself forever.
     disarmRecorder();
     setState('speaking');
+    ensureOutput();
 
-    const url = URL.createObjectURL(blob);
-    audioEl = new Audio(url);
-    audioEl.crossOrigin = 'anonymous';
-    try {
-      if (!outCtx) outCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (outCtx.state === 'suspended') await outCtx.resume();
-      outSource = outCtx.createMediaElementSource(audioEl);
-      outAnalyser = outCtx.createAnalyser();
-      outAnalyser.fftSize = 512;
-      outSource.connect(outAnalyser);
-      outAnalyser.connect(outCtx.destination);
-    } catch (e) { outAnalyser = null; }        // playback still works
+    if (outUrl) URL.revokeObjectURL(outUrl);
+    outUrl = URL.createObjectURL(blob);
+    outEl.src = outUrl;
 
     const buf = outAnalyser ? new Uint8Array(outAnalyser.fftSize) : null;
     const meter = setInterval(function () {
-      if (!outAnalyser) { level = 0.05 + Math.random() * 0.04; return; }
+      if (!outAnalyser) { level = isPlaying() ? 0.05 + Math.random() * 0.04 : 0; return; }
       outAnalyser.getByteTimeDomainData(buf);
       let sum = 0;
       for (let i = 0; i < buf.length; i++) { const d = (buf[i] - 128) / 128; sum += d * d; }
@@ -556,22 +590,43 @@
     }, LEVEL_TICK_MS);
 
     await new Promise(function (resolve) {
-      audioEl.onended = resolve;
-      audioEl.onerror = function () { toast('The browser could not play that audio.', 'bad'); resolve(); };
-      audioEl.play().catch(function (e) {
-        toast('Playback blocked by the browser — click anywhere once, then try again.', 'warn', 9000);
+      let done = false;
+      const finish = function () {
+        if (done) return;
+        done = true;
+        clearTimeout(guard);
+        if (endTurn === finish) endTurn = null;
         resolve();
+      };
+      // stopSpeaking() reaches in through this, so a barge-in always lands
+      // even after playback has already ended.
+      endTurn = finish;
+      // Last resort: a routed element that never fires 'ended' must not wedge
+      // the turn forever. Generous, and only ever fires when something broke.
+      const guard = setTimeout(finish, MAX_SPEECH_MS);
+      outEl.onended = finish;
+      outEl.onerror = function () {
+        toast('The browser could not play that audio.', 'bad'); finish();
+      };
+      outEl.play().catch(function () {
+        toast('Playback blocked by the browser — click anywhere once, then try again.',
+              'warn', 9000);
+        finish();
       });
     });
 
     clearInterval(meter); level = 0;
-    URL.revokeObjectURL(url);
-    audioEl = null;
-    if (continuous) { setState('listening'); armRecorder(); } else setState('idle');
+    if (mine !== speakSeq) return;            // a newer answer owns the state
+    resumeListening();
   }
 
+  /* Barge-in. Safe to call at any time, playing or not — it can never leave
+     the page stuck in 'speaking'. */
   function stopSpeaking() {
-    if (audioEl) { audioEl.pause(); audioEl.onended && audioEl.onended(); audioEl = null; }
+    speakSeq++;                               // invalidate any in-flight speak()
+    if (outEl) { try { outEl.pause(); } catch (e) { /* nothing playing */ } }
+    if (endTurn) { const f = endTurn; endTurn = null; f(); }
+    if (state === 'speaking') resumeListening();
   }
 
   /* ------------------------------------------------------------ listen */
@@ -580,25 +635,19 @@
   let speechSeen = false, quietSince = 0, turnStart = 0;
 
   async function ensureMic() {
-    console.log('[Aeris] ensureMic called, stream exists:', !!stream);
     if (stream) return true;
-    console.log('[Aeris] checking mediaDevices API...');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      console.log('[Aeris] No mediaDevices API available');
       caption('This browser exposes no microphone API. Type instead.', 'err');
       toast('No microphone API in this browser.', 'bad', 12000);
       setState('error'); return false;
     }
     try {
-      console.log('[Aeris] requesting microphone access...');
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
-      console.log('[Aeris] microphone access granted, stream:', stream);
     } catch (e) {
       // A blocked mic that produces no error is the single most confusing
       // failure in this build, so say exactly what happened.
-      console.log('[Aeris] getUserMedia error:', e.name, e.message);
       const why = {
         NotAllowedError: 'You (or the browser) denied microphone access. Click the padlock in ' +
                          'the address bar and allow the microphone for localhost.',
@@ -612,14 +661,12 @@
       setState('error');
       return false;
     }
-    console.log('[Aeris] creating audio context...');
     inCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = inCtx.createMediaStreamSource(stream);
     analyser = inCtx.createAnalyser();
     analyser.fftSize = 1024;
     src.connect(analyser);
     inBuf = new Uint8Array(analyser.fftSize);
-    console.log('[Aeris] audio context ready');
     return true;
   }
 
@@ -632,7 +679,11 @@
   }
 
   function armRecorder() {
-    if (!stream || state === 'speaking' || state === 'thinking') return;
+    // Keyed off what is actually true, not off the state label. The label
+    // getting stuck used to leave the mic permanently deaf with no error.
+    if (!stream) return;
+    if (recorder && recorder.state === 'recording') return;   // already listening
+    if (isPlaying() || state === 'thinking') return;          // don't hear herself
     let mime = '';
     ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus']
       .some(function (m) {
@@ -694,13 +745,23 @@
     recorder = null; chunks = [];
   }
 
+  /* Hands-free has to survive anything — a dropped 'ended' event, a request
+     that threw between states, a recorder the browser killed on its own. If
+     the mic is meant to be open and nothing is stopping it, open it. */
+  setInterval(function () {
+    if (!continuous || !stream) return;
+    if (isPlaying() || state === 'thinking' || asking) return;
+    if (recorder && recorder.state === 'recording') return;
+    armRecorder();
+  }, REARM_TICK_MS);
+
   async function onRecorderStop() {
     const heard = speechSeen;
     const blob = new Blob(chunks, { type: (recorder && recorder.mimeType) || 'audio/webm' });
     chunks = [];
     if (!heard || blob.size < 1500) {
       caption(continuous ? 'listening…' : '');
-      if (continuous) armRecorder(); else setState('idle');
+      resumeListening();
       return;
     }
     setState('thinking');
@@ -715,34 +776,39 @@
     } catch (e) {
       caption('Could not transcribe: ' + esc(e.message), 'err');
       toast('Transcription failed: ' + e.message, 'bad', 11000);
-      if (continuous) armRecorder(); else setState('idle');
+      resumeListening();
       return;
     }
     if (!r.text) {
       caption(continuous ? 'listening…' : 'nothing heard');
-      if (continuous) armRecorder(); else setState('idle');
+      resumeListening();
       return;
     }
     await ask(r.text, true);
   }
 
   async function toggleMic() {
-    console.log('[Aeris] toggleMic called, state:', state, 'continuous:', continuous);
-    if (state === 'speaking') { console.log('[Aeris] stopping speaker'); stopSpeaking(); return; }      // barge-in
+    // Barge-in only counts while sound is actually coming out. Returning here
+    // on the *label* alone is what used to wedge the button: once playback had
+    // finished, every click and every Space hit this line and did nothing.
+    if (isPlaying()) { stopSpeaking(); return; }
+    if (state === 'speaking' || state === 'error') {
+      speakSeq++; endTurn = null;             // clear a turn that never landed
+      setState('idle');
+    }
     if (continuous) {
-      console.log('[Aeris] turning off continuous mic');
       continuous = false; disarmRecorder(); setState('idle'); caption('');
       return;
     }
-    console.log('[Aeris] ensuring mic access...');
-    if (!(await ensureMic())) { console.log('[Aeris] ensureMic failed'); return; }
-    console.log('[Aeris] mic access granted, resuming audio context if needed');
+    // Built here, inside the click, so the browser counts it as a user gesture.
+    ensureOutput();
+    if (!(await ensureMic())) return;
     if (inCtx && inCtx.state === 'suspended') await inCtx.resume();
     continuous = true;
-    console.log('[Aeris] arming recorder');
     armRecorder();
     toast('Mic on. Just talk — I end your turn after ' + SILENCE_HANG_MS +
-          'ms of quiet. Space or Esc to cut me off.', 'ok', 7000);
+          'ms of quiet, answer, then listen again. Space or Esc to cut me off.',
+          'ok', 7000);
   }
 
   /* ------------------------------------------------------------- wiring */
@@ -833,7 +899,7 @@
   window.addEventListener('keydown', function (ev) {
     const typing = document.activeElement === el.ask || document.activeElement === el.search;
     if (ev.key === 'Escape') {
-      if (state === 'speaking') { stopSpeaking(); return; }
+      if (isPlaying()) { stopSpeaking(); return; }
       el.card.classList.remove('show'); Graph.clearFocus(); onFocus(null);
       if (typing) document.activeElement.blur();
       return;
@@ -841,7 +907,7 @@
     if (typing) return;
     if (ev.code === 'Space') {
       ev.preventDefault();
-      if (state === 'speaking') stopSpeaking(); else toggleMic();
+      toggleMic();                            // handles barge-in itself
     }
     if (ev.key === '/') { ev.preventDefault(); el.ask.focus(); }
   });

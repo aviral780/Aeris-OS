@@ -340,6 +340,17 @@ button {
   animation: pulse 1.6s ease-in-out infinite;
 }
 .iconbtn.muted { color: var(--danger); border-color: rgba(255,92,114,0.4); }
+
+/* Wake and share get their own colour rather than the accent, so "she is
+   waiting for her name" never looks like "she is listening to you". */
+#btn-wake.on {
+  color: #b9aef0; border-color: rgba(138,123,216,0.55);
+  background: rgba(138,123,216,0.14); box-shadow: 0 0 16px rgba(138,123,216,0.32);
+}
+#btn-share.on {
+  color: #7ef0a0; border-color: rgba(126,240,160,0.5);
+  background: rgba(126,240,160,0.12); box-shadow: 0 0 16px rgba(126,240,160,0.28);
+}
 @keyframes pulse {
   0%,100% { box-shadow: 0 0 0 0 rgba(53,224,240,0.42); }
   50%     { box-shadow: 0 0 0 9px rgba(53,224,240,0); }

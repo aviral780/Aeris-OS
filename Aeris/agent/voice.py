@@ -20,6 +20,7 @@ import json
 import mimetypes
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -401,6 +402,101 @@ def transcribe(audio, content_type="audio/webm"):
     if not text:
         return "", None          # silence is a valid answer, not an error
     return text, None
+
+
+# --------------------------------------------------------------------------
+# the wake word
+#
+# "The mic shouldn't be on until I say Aeris" cannot be literally true —
+# something has to hear the word. What is true, and what this is built to
+# guarantee, is that nothing is sent anywhere and nothing is kept until the
+# word matches. The browser watches the microphone's energy level locally and
+# only posts audio once someone actually speaks; the server transcribes it,
+# checks for the word, and throws away everything that does not match.
+#
+# Which is exactly why wake mode refuses to run on a metered backend. Every
+# stray sentence in the room becomes a transcription call, and billing Aviral
+# per overheard word to provide a feature he asked for would be indefensible.
+# --------------------------------------------------------------------------
+
+# Scribe and whisper both mishear a made-up name. These are what "Aeris"
+# actually comes back as, so they all count — being deaf to your own name is
+# a worse failure than waking up one time too many.
+WAKE_WORDS = {
+    "aeris", "aeries", "airis", "aris", "arris", "eris", "erys",
+    "aries", "arias", "ares", "eiris", "ayris", "arees",
+}
+# "iris" is deliberately absent. It is the one common English word on the
+# candidate list that is also phonetically distant — "eye-ris", not "air-is" —
+# so it costs more in false wakes than it earns in catching a mishearing.
+WAKE_SCAN_WORDS = 3          # "hey Aeris, ..." — but not a word buried mid-sentence
+
+
+def wake_word():
+    return data.env("AERIS_WAKE_WORD", "aeris").strip().lower()
+
+
+def _wake_set():
+    configured = wake_word()
+    return WAKE_WORDS | {configured} if configured else WAKE_WORDS
+
+
+def wake_match(text):
+    """(matched, whatever he said after the name).
+
+    The remainder is the point: "Aeris, what's broken" in one breath should
+    work without a pause and a second recording.
+    """
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    if not words:
+        return False, ""
+    names = _wake_set()
+    for i, word in enumerate(words[:WAKE_SCAN_WORDS]):
+        if word in names:
+            # Cut from the original text, not the lowercased word list, so
+            # casing and punctuation survive in the part he wants answered.
+            pattern = re.compile(r"^.*?\b%s\b[\s,.!?:-]*" % re.escape(word), re.I | re.S)
+            rest = pattern.sub("", text or "", count=1).strip()
+            return True, rest
+    return False, ""
+
+
+def wake_ready():
+    """Whether wake mode can run at all, and why not when it cannot."""
+    stt = stt_backend()
+    if not stt["ok"]:
+        return {"ok": False, "reason": "no-stt",
+                "detail": "Wake mode needs speech-to-text. %s" % stt["detail"]}
+    if not stt["free"]:
+        return {"ok": False, "reason": "metered",
+                "detail": "Wake mode would transcribe every sentence spoken near the "
+                          "microphone, and %s bills per use. Install the free local "
+                          "route (brew install whisper-cpp ffmpeg, then set "
+                          "WHISPER_MODEL) and it switches itself on."
+                          % stt["name"]}
+    return {"ok": True, "reason": "", "backend": stt["name"],
+            "detail": "Listening locally for \"%s\". Nothing is sent or kept until "
+                      "it matches." % wake_word()}
+
+
+def hear_wake(audio, content_type="audio/webm"):
+    """Transcribe one overheard chunk and decide whether it was for her.
+
+    Returns (result, error). A chunk that was not for her leaves nothing
+    behind: no memory, no log, no history.
+    """
+    ready = wake_ready()
+    if not ready["ok"]:
+        return None, ready["detail"]
+    text, err = transcribe(audio, content_type)
+    if err:
+        return None, err
+    matched, rest = wake_match(text or "")
+    if not matched:
+        # Deliberately not returning the text. It was not addressed to her, so
+        # it does not travel any further than this function.
+        return {"woke": False, "command": ""}, None
+    return {"woke": True, "command": rest, "heard": text}, None
 
 
 # --------------------------------------------------------------------------

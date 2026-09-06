@@ -31,6 +31,7 @@
     results: $('#results'), ask: $('#ask'), caption: $('#caption'),
     card: $('#card'), tip: $('#tip'), toasts: $('#toasts'), bars: $('#bars'),
     mic: $('#btn-mic'), mute: $('#btn-mute'), send: $('#btn-send'),
+    wake: $('#btn-wake'), share: $('#btn-share'),
     brandSub: $('#brand-sub'), modeChip: $('#mode-chip')
   };
   const barEls = Array.prototype.slice.call(el.bars.children);
@@ -94,6 +95,9 @@
 
     const palette = {
       idle:      ['#35e0f0', 0.30],
+      // Awake but not listening to him. Dimmer than listening on purpose —
+      // the ring should not look like it is taking anything in.
+      waiting:   ['#8a7bd8', 0.45],
       listening: ['#35e0f0', 1.00],
       thinking:  ['#f6b73c', 0.85],
       speaking:  ['#7ef0a0', 0.95],
@@ -165,7 +169,7 @@
 
   function setState(s) {
     state = s;
-    el.stateLabel.textContent = s;
+    el.stateLabel.textContent = s === 'waiting' ? 'waiting for “' + wakeWordLabel() + '”' : s;
     el.mic.classList.toggle('rec', s === 'listening');
     el.mic.classList.toggle('on', s === 'thinking' || s === 'speaking');
   }
@@ -521,6 +525,9 @@
   async function ask(text, spoken) {
     text = (text || '').trim();
     if (!text || asking) return;
+    // While he is sharing, a question about what is in front of him is
+    // answered from the frame rather than from his files.
+    if (shareStream && SCREEN_Q.test(text)) { return seeScreen(text); }
     asking = true;
     caption('<span class="you">' + esc(text) + '</span>');
     setState('thinking');
@@ -585,7 +592,15 @@
   /* The single place that decides what happens when she stops talking. */
   function resumeListening() {
     level = 0;
-    if (continuous && stream) { setState('listening'); armRecorder(); }
+    if (waking && stream) {
+      // Back to waiting for her name, not to an open microphone.
+      listenFor = 'wake';
+      setState('waiting');
+      caption('');
+      armRecorder();
+      return;
+    }
+    if (continuous && stream) { listenFor = 'command'; setState('listening'); armRecorder(); }
     else setState('idle');
   }
 
@@ -671,6 +686,12 @@
   let inCtx = null, analyser = null, inBuf = null;
   let speechSeen = false, quietSince = 0, turnStart = 0;
 
+  /* What the next recording is for. 'command' is a turn she answers; 'wake'
+     is a chunk that is thrown away unless it contained her name. */
+  let listenFor = 'command';
+  let waking = false;              // wake mode armed
+  let wakeInfo = null;             // what the server says about wake support
+
   async function ensureMic() {
     if (stream) return true;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -739,8 +760,12 @@
     recorder.start();
 
     speechSeen = false; quietSince = 0; turnStart = Date.now();
-    setState('listening');
-    caption('listening…');
+    if (listenFor === 'wake') {
+      setState('waiting');
+    } else {
+      setState('listening');
+      caption('listening…');
+    }
 
     clearInterval(micTimer);
     // setInterval, not requestAnimationFrame: rAF is throttled to nothing in a
@@ -752,8 +777,13 @@
 
       if (level > SPEECH_LEVEL) {
         speechSeen = true; quietSince = 0;
-        caption('listening… <span style="opacity:.5">' + '▍'.repeat(
-          Math.min(18, 1 + Math.round(level * 90))) + '</span>');
+        // In wake mode the caption stays empty. Drawing a live meter for every
+        // overheard sentence would make it look like she is transcribing the
+        // room, which is exactly what she is not doing.
+        if (listenFor !== 'wake') {
+          caption('listening… <span style="opacity:.5">' + '▍'.repeat(
+            Math.min(18, 1 + Math.round(level * 90))) + '</span>');
+        }
       } else if (level < SILENCE_LEVEL) {
         if (!quietSince) quietSince = now;
       } else {
@@ -794,13 +824,47 @@
 
   async function onRecorderStop() {
     const heard = speechSeen;
+    const purpose = listenFor;
     const blob = new Blob(chunks, { type: (recorder && recorder.mimeType) || 'audio/webm' });
     chunks = [];
     if (!heard || blob.size < 1500) {
-      caption(continuous ? 'listening…' : '');
+      caption(purpose === 'wake' ? '' : (continuous ? 'listening…' : ''));
       resumeListening();
       return;
     }
+
+    /* Wake mode. This chunk was overheard, not addressed to her. It goes to
+       the server, is checked for her name, and unless it matched, nothing
+       about it is kept — not a transcript, not a caption, not a log line. */
+    if (purpose === 'wake') {
+      let r;
+      try {
+        r = await json('/api/wake', {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'audio/webm' },
+          body: blob
+        });
+      } catch (e) {
+        // Don't shout on every overheard sentence — say it once and stop.
+        toast('Wake word check failed: ' + e.message + ' — switching wake off.',
+              'bad', 11000);
+        stopWake();
+        return;
+      }
+      if (!r.woke) { resumeListening(); return; }
+
+      if (r.command) {
+        // "Aeris, what's broken" in one breath. Nothing more to wait for.
+        await ask(r.command, true);
+      } else {
+        // Just her name. Answer, then take the next thing he says as the turn.
+        listenFor = 'command';
+        caption('<span class="you">' + esc(wakeWordLabel()) + '</span> — go on');
+        if (!muted) await speak('Yes, SIR?'); else resumeListening();
+      }
+      return;
+    }
+
     setState('thinking');
     caption('transcribing…');
     let r;
@@ -848,8 +912,152 @@
           'ok', 7000);
   }
 
+  /* --------------------------------------------------------- wake word */
+  function wakeWordLabel() {
+    return (status && status.voice && status.voice.wake_word) || 'Aeris';
+  }
+
+  async function startWake() {
+    wakeInfo = (status && status.voice && status.voice.wake) || null;
+    if (wakeInfo && !wakeInfo.ok) {
+      // Refused on purpose. Metered speech-to-text would bill him for every
+      // sentence spoken near the microphone.
+      caption(esc(wakeInfo.detail), 'err');
+      toast(wakeInfo.detail, 'bad', 15000);
+      return;
+    }
+    ensureOutput();
+    if (!(await ensureMic())) return;
+    if (inCtx && inCtx.state === 'suspended') await inCtx.resume();
+
+    waking = true; continuous = false;
+    el.wake.classList.add('on');
+    listenFor = 'wake';
+    armRecorder();
+    setState('waiting');
+    caption('');
+    toast('Waiting for “' + wakeWordLabel() + '”. Nothing is sent or kept until '
+          + 'you say it. Say “' + wakeWordLabel() + ', brief me” in one breath.',
+          'ok', 9000);
+  }
+
+  function stopWake() {
+    waking = false;
+    listenFor = 'command';
+    el.wake.classList.remove('on');
+    disarmRecorder();
+    setState('idle');
+    caption('');
+  }
+
+  function toggleWake() {
+    if (waking) { stopWake(); toast('Wake word off. The mic is closed.', 'ok', 4000); }
+    else startWake();
+  }
+
+  /* ------------------------------------------------------- screen share */
+  /* He picks the window, the browser asks him, and a frame is only ever read
+     when he asks a question about it. Better than capturing the screen
+     server-side: he chooses what is visible, and macOS never has to grant the
+     terminal blanket Screen Recording permission. */
+  let shareStream = null, shareVideo = null;
+  /* Deliberately narrow. "what is this" while sharing means the screen; "what
+     is the scam platform" does not, and hijacking that would be worse than
+     making him say the word "screen". */
+  const SCREEN_Q = new RegExp(
+    '\\b(' +
+    'screen|display' +
+    '|what(\'s| is| am i)? ?(this|that|here|looking at)' +
+    '|read (this|that|it|the)' +
+    '|(this|that|the) (error|message|dialog|log|page|code)' +
+    '|see (this|that|my)' +
+    '|what does (this|that|it)' +
+    '|explain (this|that)' +
+    ')\\b', 'i');
+
+  async function startShare() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      toast('This browser cannot share a screen.', 'bad', 9000);
+      return;
+    }
+    try {
+      shareStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 1 }, audio: false
+      });
+    } catch (e) {
+      if (e.name !== 'NotAllowedError') toast('Screen share failed: ' + e.message, 'bad', 9000);
+      return;
+    }
+    shareVideo = document.createElement('video');
+    shareVideo.srcObject = shareStream;
+    shareVideo.muted = true;
+    await shareVideo.play().catch(function () {});
+
+    // Stopping from the browser's own "stop sharing" bar must also update us.
+    shareStream.getVideoTracks().forEach(function (t) {
+      t.addEventListener('ended', function () { stopShare(true); });
+    });
+    el.share.classList.add('on');
+    toast('Sharing. Ask me about what is on it — “what does this error say?” '
+          + 'Nothing is captured until you ask.', 'ok', 9000);
+  }
+
+  function stopShare(silent) {
+    if (shareStream) shareStream.getTracks().forEach(function (t) { t.stop(); });
+    shareStream = null; shareVideo = null;
+    el.share.classList.remove('on');
+    if (!silent) toast('Stopped sharing.', 'ok', 3500);
+  }
+
+  function toggleShare() { if (shareStream) stopShare(); else startShare(); }
+
+  function grabFrame() {
+    if (!shareVideo || !shareVideo.videoWidth) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = shareVideo.videoWidth;
+    canvas.height = shareVideo.videoHeight;
+    canvas.getContext('2d').drawImage(shareVideo, 0, 0);
+    return new Promise(function (resolve) { canvas.toBlob(resolve, 'image/png'); });
+  }
+
+  async function seeScreen(question) {
+    const frame = await grabFrame();
+    if (!frame) { toast('No frame from the shared screen yet — try again.', 'warn'); return; }
+    setState('thinking');
+    caption('<span class="you">' + esc(question) + '</span> — looking…');
+    let r;
+    try {
+      r = await json('/api/see', {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/png', 'X-Aeris-Question': question },
+        body: frame
+      });
+    } catch (e) {
+      caption('Could not read the screen: ' + esc(e.message), 'err');
+      resumeListening();
+      return;
+    }
+    if (!r.ok) {
+      caption(esc(r.summary), 'err');
+      toast(r.summary, 'bad', 11000);
+      resumeListening();
+      return;
+    }
+    caption(esc(r.summary));
+    showCard({
+      title: 'your screen',
+      subtitle: 'one frame, read by ' + (r.read_by || '?') + ', not kept',
+      rows: [{ k: 'Question', v: esc(question) },
+             { k: 'Kept', v: 'nothing — the frame is already gone' }],
+      note: 'Captured because you asked. Aeris never takes a frame on her own.'
+    });
+    if (!muted) await speak(r.summary); else resumeListening();
+  }
+
   /* ------------------------------------------------------------- wiring */
   el.mic.addEventListener('click', toggleMic);
+  el.wake.addEventListener('click', toggleWake);
+  el.share.addEventListener('click', toggleShare);
   el.send.addEventListener('click', function () {
     const t = el.ask.value.trim(); if (t) { el.ask.value = ''; ask(t); }
   });

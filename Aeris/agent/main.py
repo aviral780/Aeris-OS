@@ -251,7 +251,8 @@ def status_payload():
                   "available": st.get("available", [])},
         "voice": {"ok": ok_voice,
                   "voice_id": voice.voice_id() if tts["name"] == "elevenlabs" else "",
-                  "tts": tts, "stt": stt,
+                  "tts": tts, "stt": stt, "wake": voice.wake_ready(),
+                  "wake_word": voice.wake_word(),
                   "detail": "%s %s" % (tts["detail"], stt["detail"])
                             if ok_voice else
                             "No speech backend available — text still works. %s %s"
@@ -406,6 +407,23 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._fail(503, err)
             return self._send(200, {"text": text or "", "bytes": len(audio)})
+
+        if path == "/api/wake":
+            audio = self._body()
+            ctype = self.headers.get("Content-Type", "audio/webm")
+            heard, err = voice.hear_wake(audio, ctype)
+            if err:
+                return self._fail(503, err)
+            # A chunk that was not addressed to her leaves nothing behind —
+            # no transcript in the response, no log line, no history entry.
+            return self._send(200, heard)
+
+        if path == "/api/see":
+            # A frame from a screen he chose to share. Described and dropped.
+            from . import screen as screen_mod
+            png = self._body()
+            question = self.headers.get("X-Aeris-Question", "")
+            return self._send(200, screen_mod.look_at_bytes(png, question))
 
         if path == "/api/voice":
             payload = self._json_body()

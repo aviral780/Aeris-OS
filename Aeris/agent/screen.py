@@ -168,6 +168,47 @@ def _describe_anthropic(st, shot, question):
     return (text, None) if text else (None, "The model returned nothing.")
 
 
+def describe(shot, question="", captured_by="capture"):
+    """Read one image file. The caller owns the file and deletes it."""
+    found = llm.backends()["found"]
+    size = os.path.getsize(shot)
+    failures = []
+    for name, fn in (("claude_cli", _describe_claude_cli),
+                     ("ollama", _describe_ollama),
+                     ("anthropic", _describe_anthropic)):
+        if name not in found:
+            continue
+        text, why = fn(found[name], shot, question)
+        if text:
+            return {"ok": True, "summary": text, "read_by": name,
+                    "free": name != "anthropic", "bytes": size,
+                    "captured_by": captured_by, "retained": False}
+        failures.append("%s: %s" % (name, why))
+
+    return {"ok": False, "bytes": size,
+            "summary": " ".join(failures) or
+                       "Nothing here can read an image. The free route is the "
+                       "`claude` CLI on your subscription; `ollama pull "
+                       "llama3.2-vision` is the fully local alternative."}
+
+
+def look_at_bytes(png, question=""):
+    """Describe a frame the browser sent — a screen he chose to share.
+
+    Written to a temporary directory only because every vision backend wants a
+    path, and removed before this returns. A shared frame is no more retained
+    than a captured one.
+    """
+    if not png:
+        return {"ok": False, "summary": "No image arrived at the server."}
+    with tempfile.TemporaryDirectory(prefix="aeris-share-") as tmp:
+        shot = os.path.join(tmp, "frame.png")
+        with open(shot, "wb") as fh:
+            fh.write(png)
+        _shrink(shot)
+        return describe(shot, question, captured_by="screen share")
+
+
 def look(question=""):
     """Capture once, read it, throw the image away. Returns a result dict.
 
@@ -178,28 +219,8 @@ def look(question=""):
     if not how["ok"]:
         return {"ok": False, "summary": how["detail"]}
 
-    found = llm.backends()["found"]
     with tempfile.TemporaryDirectory(prefix="aeris-screen-") as tmp:
         shot, err = capture(tmp)
         if err:
             return {"ok": False, "summary": err}
-        size = os.path.getsize(shot)
-
-        failures = []
-        for name, fn in (("claude_cli", _describe_claude_cli),
-                         ("ollama", _describe_ollama),
-                         ("anthropic", _describe_anthropic)):
-            if name not in found:
-                continue
-            text, why = fn(found[name], shot, question)
-            if text:
-                return {"ok": True, "summary": text, "read_by": name,
-                        "free": name != "anthropic", "bytes": size,
-                        "captured_by": how["how"], "retained": False}
-            failures.append("%s: %s" % (name, why))
-
-        return {"ok": False, "bytes": size,
-                "summary": " ".join(failures) or
-                           "Nothing here can read an image. The free route is the "
-                           "`claude` CLI on your subscription; `ollama pull "
-                           "llama3.2-vision` is the fully local alternative."}
+        return describe(shot, question, captured_by=how["how"])

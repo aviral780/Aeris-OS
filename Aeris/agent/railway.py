@@ -68,9 +68,14 @@ def _is_project_token():
 
 
 def _headers():
+    # Python's default urllib User-Agent ("Python-urllib/3.x") is a common bot
+    # signature, and Cloudflare in front of backboard.railway.com will answer
+    # it with an HTML challenge page instead of the API response — which is
+    # exactly what "returned something that was not JSON" turned out to be.
+    base = {"Content-Type": "application/json", "User-Agent": "Aeris/1.0"}
     if _is_project_token():
-        return {"Project-Access-Token": _token(), "Content-Type": "application/json"}
-    return {"Authorization": "Bearer %s" % _token(), "Content-Type": "application/json"}
+        return dict(base, **{"Project-Access-Token": _token()})
+    return dict(base, Authorization="Bearer %s" % _token())
 
 
 def _query(query, variables=None, cache_key=""):

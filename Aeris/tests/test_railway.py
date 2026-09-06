@@ -92,6 +92,17 @@ class RailwayTest(unittest.TestCase):
 
     # -- auth --------------------------------------------------------------
 
+    def test_a_real_user_agent_is_sent(self):
+        """Python's default urllib User-Agent is a common bot signature, and
+        Cloudflare in front of backboard.railway.com answers it with an HTML
+        challenge page instead of JSON — the exact failure this pins."""
+        captured = []
+        self._reply({"data": {"me": {"name": "Aviral"}}}, captured)
+        railway.whoami()
+        headers = {k.lower(): v for k, v in captured[0].header_items()}
+        self.assertIn("user-agent", headers)
+        self.assertNotIn("python-urllib", headers["user-agent"].lower())
+
     def test_an_account_token_uses_bearer(self):
         captured = []
         self._reply({"data": {"me": {"name": "Aviral"}}}, captured)

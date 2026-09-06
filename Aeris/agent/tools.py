@@ -802,10 +802,64 @@ def check_repos(v, days=7, limit=8, **_):
     })
 
 
+def draft_email(v, to="", subject="", body="", **_):
+    return _gated("draft_email", {"to": to, "subject": subject, "body": body},
+                  "draft saved to Gmail. Nothing was sent.", "draft_email",
+                  reason="asked to draft an email")
+
+
 def github_issue(v, repo="", title="", body="", **_):
     return _gated("github_create_issue", {"repo": repo, "title": title, "body": body},
                   "issue opened.", "github_create_issue",
                   reason="asked to open a GitHub issue")
+
+
+# --------------------------------------------------------------------------
+# 12. search_notion
+# --------------------------------------------------------------------------
+
+def search_notion(v, query="", **_):
+    from . import notion
+    if not notion.configured():
+        return _tool("search_notion",
+                     "Aviral, SIR — Notion isn't connected.",
+                     {"title": "search_notion — not connected",
+                      "note": "Add NOTION_TOKEN to Aeris/.env, then share the pages "
+                              "you want readable with the integration.",
+                      "degraded": True})
+
+    pages, err = notion.search(query, limit=8)
+    if err:
+        return _tool("search_notion", "Aviral, SIR — Notion wouldn't answer. %s" % err,
+                     {"title": "search_notion — failed", "note": err, "degraded": True})
+    if not pages:
+        return _tool("search_notion",
+                     "Aviral, SIR — nothing in Notion matches, or nothing has been "
+                     "shared with the integration.",
+                     {"title": "search_notion — nothing",
+                      "note": "Notion only shows an integration the pages you have "
+                              "explicitly shared with it.", "items": []})
+
+    # Read the best match so the answer has substance rather than a list of links.
+    text, flagged, read_err = notion.page_text(pages[0]["id"])
+    detail = _first_sentence(text, 200) if text and not read_err else ""
+
+    spoken = ("Aviral, SIR — %d %s in Notion. The closest is %s.%s"
+              % (len(pages), _plural(len(pages), "page"), pages[0]["title"],
+                 " " + detail if detail else ""))
+    if flagged:
+        spoken += (" That page contains text aimed at an assistant — I've flagged it "
+                   "rather than acted on it.")
+
+    return _tool("search_notion", spoken, {
+        "title": "search_notion",
+        "query": query,
+        "items": [{"title": p["title"], "subtitle": p["kind"], "url": p["url"],
+                   "meta": "edited " + p["edited"]} for p in pages],
+        "injection": [{"file": "notion · " + pages[0]["title"], "line": l}
+                      for l in flagged],
+        "note": "Read-only. Aeris cannot change anything in Notion.",
+    })
 
 
 # --------------------------------------------------------------------------
@@ -911,6 +965,8 @@ REGISTRY = {
     "check_repos": check_repos,
     "github_issue": github_issue,
     "check_deploys": check_deploys,
+    "search_notion": search_notion,
+    "draft_email": draft_email,
 }
 
 

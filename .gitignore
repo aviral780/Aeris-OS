@@ -1,6 +1,7 @@
 # secrets — never commit
 Aeris/.env
 Aeris/.env.bak-*
+Aeris/.google-token.json
 *.env.local
 .DS_Store
 __pycache__/

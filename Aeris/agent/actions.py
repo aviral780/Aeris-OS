@@ -269,6 +269,11 @@ def _github_comment(**args):
     return github.comment(**args)
 
 
+def _draft_email(**args):
+    from . import google
+    return google.create_draft(**args)
+
+
 # --------------------------------------------------------------------------
 # registry
 # --------------------------------------------------------------------------
@@ -310,6 +315,12 @@ register(Capability("github_create_issue", _github_create_issue, CONFIRM,
                     "Open an issue on GitHub. Always asks first.", outward=True))
 register(Capability("github_comment", _github_comment, CONFIRM,
                     "Comment on a GitHub issue or pull request. Always asks first.",
+                    outward=True))
+# A draft is not a sent mail — it sits in his drafts folder until he sends it
+# himself, and there is no send function anywhere in Aeris. It still writes to
+# an account outside this machine, so it still stops and asks.
+register(Capability("draft_email", _draft_email, CONFIRM,
+                    "Save a draft in Gmail. Never sends. Always asks first.",
                     outward=True))
 
 
@@ -384,6 +395,9 @@ def _describe(name, args):
     if name == "github_comment":
         return "Comment on %s#%s: “%s”" % (args.get("repo", ""), args.get("number", ""),
                                            str(args.get("body", ""))[:120])
+    if name == "draft_email":
+        return "Save a Gmail draft to %s — “%s” (not sent)" % (
+            args.get("to", ""), args.get("subject", ""))
     return "%s %s" % (name, json.dumps(args, default=str)[:160])
 
 

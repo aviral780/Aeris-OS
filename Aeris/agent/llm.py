@@ -249,6 +249,19 @@ TOOL_SCHEMA = [
                     "live. Use for 'is anything down', 'did my deploy fail', 'is it up'. "
                     "Read-only — Aeris cannot redeploy or restart.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "draft_email",
+     "description": "Write a reply or a new email and SAVE IT AS A DRAFT in his Gmail. "
+                    "It is never sent — he sends it himself, or does not. Propose this "
+                    "freely when a reply is the obvious next step; it stops and asks "
+                    "him before saving.",
+     "input_schema": {"type": "object", "properties": {
+         "to": {"type": "string"}, "subject": {"type": "string"},
+         "body": {"type": "string"}}, "required": ["to", "subject", "body"]}},
+    {"name": "search_notion",
+     "description": "Search his Notion workspace and read the closest page. Only sees "
+                    "pages he has shared with the integration. Read-only.",
+     "input_schema": {"type": "object", "properties": {
+         "query": {"type": "string"}}, "required": ["query"]}},
     {"name": "github_issue",
      "description": "Open an issue on one of his repositories. This is visible to other "
                     "people, so it always stops and asks him first — propose it when it "

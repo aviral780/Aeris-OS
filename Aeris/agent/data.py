@@ -299,15 +299,29 @@ def _load_json(name):
 
 
 def inbox():
-    """(messages, note). In live mode there is no mail connector — say so."""
+    """(messages, note). Real mail in live mode, fixtures in demo.
+
+    Imported inside the function on purpose: google.py reads its settings from
+    this module, so importing it at the top would be a cycle.
+    """
     if is_demo():
         return _load_json("inbox.json") or [], ""
-    return [], ("No mail account is connected. Aeris has no send capability and "
-                "no inbox credentials — connecting one is a separate decision.")
+    from . import google
+    if not google.configured() or not google.authorized():
+        return [], ("No mail account is connected. %s" % google.status()["detail"])
+    messages, err = google.messages(limit=10)
+    if err:
+        return [], "Gmail could not be read: %s" % err
+    return messages, ""
 
 
 def calendar():
     if is_demo():
         return _load_json("calendar.json") or [], ""
-    return [], ("No calendar is connected. Nothing has been read and nothing "
-                "has been guessed.")
+    from . import google
+    if not google.configured() or not google.authorized():
+        return [], ("No calendar is connected. %s" % google.status()["detail"])
+    events, err = google.events(days=7)
+    if err:
+        return [], "The calendar could not be read: %s" % err
+    return events, ""

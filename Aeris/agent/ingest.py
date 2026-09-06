@@ -33,6 +33,37 @@ MAX_EPISODE_CHARS = 1400
 MIN_TURN_CHARS = 25
 SUMMARY_TIMEOUT = 120
 
+# People paste keys into chats. Aviral will have, at some point, and this
+# importer writes conversations into plain-text files that then get read back
+# into a prompt — so a key pasted into Claude a year ago would otherwise end
+# up sitting in his vault forever. Prefixes rather than entropy heuristics:
+# a false negative leaves one secret in a private file, a false positive
+# silently eats a sentence he wanted kept.
+SECRET_PATTERNS = [
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "sk-"),              # OpenAI
+    (re.compile(r"\bsk_[A-Za-z0-9]{24,}"), "sk_"),                # ElevenLabs
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"), "gh"),          # GitHub classic
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "github_pat"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "xox"),       # Slack
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{30,}"), "AIza"),            # Google
+    (re.compile(r"\bntn_[A-Za-z0-9]{20,}"), "ntn_"),              # Notion
+    (re.compile(r"\bsecret_[A-Za-z0-9]{30,}"), "secret_"),        # Notion (older)
+    (re.compile(r"\bAKIA[0-9A-Z]{12,}"), "AKIA"),                 # AWS
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key"),
+    (re.compile(r"\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "jwt"),
+]
+
+
+def redact(text):
+    """(clean_text, what_was_removed). Never returns the secret itself."""
+    found = []
+    out = text or ""
+    for pattern, label in SECRET_PATTERNS:
+        out, hits = pattern.subn("[secret removed by Aeris]", out)
+        if hits:
+            found.extend([label] * hits)
+    return out, found
+
 
 def _clean(text):
     return re.sub(r"\s+", " ", str(text or "")).strip()
@@ -130,7 +161,7 @@ def ingest(path, summarise=False, limit=0, verbose=True):
     if limit:
         convos = convos[:limit]
 
-    written = skipped = flagged_total = 0
+    written = skipped = flagged_total = redacted_total = 0
     flagged_examples = []
     for i, convo in enumerate(convos, 1):
         if not isinstance(convo, dict):
@@ -138,13 +169,17 @@ def ingest(path, summarise=False, limit=0, verbose=True):
         title = _clean(convo.get("name") or convo.get("title") or "") or "untitled"
         when = str(convo.get("created_at") or convo.get("created") or "")[:19]
 
-        human_turns, flagged = [], 0
+        human_turns, flagged, redacted = [], 0, 0
         for msg in _turns(convo):
             if not isinstance(msg, dict) or not _is_human(msg):
                 continue
             text = _message_text(msg)
             if not text.strip():
                 continue
+            # Keys first. Anything that looks like a credential never reaches
+            # a file on disk, whatever else happens to this message.
+            text, secrets = redact(text)
+            redacted += len(secrets)
             # Anything addressed at an assistant is reported, never stored.
             hits = scan_for_injection(text)
             if hits:
@@ -155,6 +190,7 @@ def ingest(path, summarise=False, limit=0, verbose=True):
             human_turns.append(text)
 
         flagged_total += flagged
+        redacted_total += redacted
         if not human_turns:
             skipped += 1
             continue
@@ -174,6 +210,7 @@ def ingest(path, summarise=False, limit=0, verbose=True):
 
     return {"ok": True, "conversations": len(convos), "written": written,
             "skipped": skipped, "flagged": flagged_total,
+            "redacted": redacted_total,
             "flagged_examples": flagged_examples,
             "dir": str(memory.episodes_dir())}
 
@@ -202,6 +239,12 @@ def main(argv):
     print("  read      %d conversations" % out["conversations"])
     print("  written   %d episodes into %s" % (out["written"], out["dir"]))
     print("  skipped   %d (nothing durable in them)" % out["skipped"])
+    if out.get("redacted"):
+        print("  \033[93mredacted  %d credential%s in your own messages. They were NOT "
+              "written\n              to disk — but they are still in your Claude "
+              "history, so rotate\n              anything you once pasted into a "
+              "chat.\033[0m"
+              % (out["redacted"], "" if out["redacted"] == 1 else "s"))
     if out["flagged"]:
         print("  \033[93mflagged   %d messages contained instructions aimed at an "
               "assistant. They were NOT stored.\033[0m" % out["flagged"])

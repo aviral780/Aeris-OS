@@ -114,5 +114,49 @@ class SetupTest(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", out["missing_values"])
 
 
+def _fixture(prefix, length=34):
+    """A string shaped like a credential without being one.
+
+    Deliberately assembled rather than written out. A literal token in a test
+    file is still a literal token in a repository: a realistic-looking sample
+    trips GitHub's push protection at best, and at worst someone reaches for a
+    real key to make the test convincing. Filler digits satisfy the patterns
+    and convince nobody.
+    """
+    return prefix + "0" * length
+
+
+class RedactionTest(unittest.TestCase):
+    """A key pasted into a Claude chat a year ago must not end up sitting in
+    his vault in plain text because the importer copied it there."""
+
+    def test_real_key_shapes_are_removed(self):
+        from agent.ingest import redact
+        for prefix, label in (("sk-", "sk-"), ("sk_", "sk_"), ("ghp_", "gh"),
+                              ("github_pat_", "github_pat"), ("xoxb-", "xox"),
+                              ("AIzaSy", "AIza"), ("ntn_", "ntn_"), ("AKIA", "AKIA")):
+            token = _fixture(prefix)
+            clean, found = redact("my key is %s ok" % token)
+            self.assertIn(label, found, prefix)
+            self.assertNotIn(token, clean, prefix)
+            self.assertIn("ok", clean, "redaction ate the surrounding sentence")
+
+    def test_ordinary_prose_is_left_alone(self):
+        from agent.ingest import redact
+        for sample in ("nothing secret in this sentence",
+                       "the scam detection platform is the main one",
+                       "I prefer per-case pricing over a retainer"):
+            clean, found = redact(sample)
+            self.assertEqual(found, [])
+            self.assertEqual(clean, sample)
+
+    def test_the_secret_is_never_in_what_is_returned(self):
+        from agent.ingest import redact
+        secret = _fixture("sk_", 40)
+        clean, found = redact("here it is: %s ok" % secret)
+        self.assertNotIn(secret, clean)
+        self.assertNotIn(secret, repr(found))
+
+
 if __name__ == "__main__":
     unittest.main()

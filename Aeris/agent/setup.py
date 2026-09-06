@@ -120,8 +120,70 @@ def merge(write=True):
             "missing_values": missing}
 
 
+def set_value(key, value):
+    """Set one key in .env, in place, without disturbing anything else."""
+    if not ENV.is_file():
+        return False
+    lines = ENV.read_text(encoding="utf-8").splitlines()
+    done = False
+    for i, line in enumerate(lines):
+        match = KEY_LINE.match(line.strip())
+        if match and match.group(1) == key:
+            lines[i] = "%s=%s" % (key, value)
+            done = True
+            break
+    if not done:
+        lines.append("%s=%s" % (key, value))
+    ENV.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(ENV, 0o600)
+    return True
+
+
+def enter_secrets():
+    """Type each key straight into .env, echoing nothing.
+
+    The reason this exists: the obvious way to fill these in is to paste them
+    into an AI chat and ask it to write the file. That works, and it also
+    sends the key to a server and leaves it sitting in a conversation history
+    — which, given Aeris imports that history into her memory, is a genuinely
+    bad place for it to end up. getpass keeps every keystroke on this machine
+    and out of the terminal scrollback.
+    """
+    import getpass
+
+    print("\n  Nothing you type here is echoed, logged, or sent anywhere.")
+    print("  Press Enter to skip any of them.\n")
+    changed = []
+    for key, why in WANTED.items():
+        if key in ("AERIS_WRITE_ROOTS", "AERIS_VAULT_ROOTS", "WHISPER_MODEL"):
+            continue                            # paths, not secrets — type them normally
+        try:
+            value = getpass.getpass("  %s (%s)\n  > " % (key, why)).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Stopped. Nothing further was written.")
+            break
+        if value:
+            set_value(key, value)
+            changed.append(key)
+            print("  set, %d characters.\n" % len(value))
+        else:
+            print("  skipped.\n")
+    if changed:
+        print("  Written to %s (chmod 600): %s" % (ENV.name, ", ".join(changed)))
+    return changed
+
+
 def main(argv):
     check_only = "--check" in argv
+    if "--secrets" in argv:
+        print("Aeris — enter your keys")
+        print("  file      %s" % ENV)
+        if not ENV.is_file():
+            print("  \033[91mFAILED\033[0m    run `python3 -m agent.setup` first")
+            return 1
+        enter_secrets()
+        return 0
+
     print("Aeris — .env setup")
     print("  file      %s" % ENV)
 

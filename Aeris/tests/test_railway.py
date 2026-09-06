@@ -51,6 +51,9 @@ class RailwayTest(unittest.TestCase):
             return FakeResponse(json.dumps(payload).encode("utf-8"))
         railway.urllib.request.urlopen = fake
 
+    def _reply_raw(self, raw_bytes):
+        railway.urllib.request.urlopen = lambda req, timeout=None: FakeResponse(raw_bytes)
+
     # -- the whole point of this module ------------------------------------
 
     def test_a_graphql_error_is_not_an_empty_result(self):
@@ -60,6 +63,21 @@ class RailwayTest(unittest.TestCase):
         out, err = railway.overview()
         self.assertIsNone(out)
         self.assertIn("staticUrl", err)
+
+    def test_a_non_json_response_shows_what_it_actually_was(self):
+        """The old version discarded the body and said only 'not JSON', which
+        is unfalsifiable — there is no way to act on it. Whatever Railway
+        actually sent (a Cloudflare challenge page, a login redirect, an
+        empty body) must be visible in the error itself."""
+        self._reply_raw(b"<html><title>Just a moment...</title></html>")
+        out, err = railway.overview()
+        self.assertIsNone(out)
+        self.assertIn("Just a moment", err)
+
+    def test_an_empty_non_json_response_says_so_rather_than_showing_nothing(self):
+        self._reply_raw(b"")
+        _out, err = railway.projects()
+        self.assertIn("empty", err.lower())
 
     def test_null_data_without_errors_is_still_an_error(self):
         self._reply({"data": None})

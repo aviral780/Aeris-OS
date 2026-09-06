@@ -94,11 +94,11 @@ def _query(query, variables=None, cache_key=""):
     req = urllib.request.Request(API, data=body, method="POST", headers=_headers())
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            parsed = json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
-            detail = exc.read().decode("utf-8")[:300]
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
         except Exception:                                          # noqa: BLE001
             pass
         friendly = {
@@ -110,8 +110,18 @@ def _query(query, variables=None, cache_key=""):
         return None, "%s %s" % (friendly, detail)
     except (urllib.error.URLError, OSError) as exc:
         return None, "Could not reach Railway (%s)." % (getattr(exc, "reason", None) or exc)
+
+    try:
+        parsed = json.loads(raw.decode("utf-8", errors="replace"))
     except ValueError:
-        return None, "Railway returned something that was not JSON."
+        # The previous version of this line reported "not JSON" and discarded
+        # the body that would have said why, which is exactly the kind of
+        # unfalsifiable error this project exists to not have. Whatever
+        # Railway actually sent — a Cloudflare challenge page, a login
+        # redirect, an empty body — is now in the message itself.
+        snippet = " ".join(raw.decode("utf-8", errors="replace").split())[:300]
+        return None, ("Railway's response wasn't JSON. First 300 characters: %s"
+                      % (snippet or "(empty response body)"))
 
     # The whole point of this module. A GraphQL error arrives with HTTP 200
     # and a null `data`; treating that as an empty result would report a

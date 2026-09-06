@@ -244,6 +244,11 @@ TOOL_SCHEMA = [
          "days": {"type": "integer", "description": "how far back to look, default 7"},
          "limit": {"type": "integer", "description": "how many repos, default 8"}},
          "required": []}},
+    {"name": "check_deploys",
+     "description": "Railway: whether anything he has deployed is broken, mid-deploy or "
+                    "live. Use for 'is anything down', 'did my deploy fail', 'is it up'. "
+                    "Read-only — Aeris cannot redeploy or restart.",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "github_issue",
      "description": "Open an issue on one of his repositories. This is visible to other "
                     "people, so it always stops and asks him first — propose it when it "
@@ -397,10 +402,14 @@ FOLLOWUP = re.compile(r"^\s*(why|why\?|why not|how so|and\?|so\?|go on|keep goin
                       r"|what about (the )?(first|second|third|last|other)|and that\?)\b", re.I)
 
 TOOL_CUES = [
-    # Repos before everything: "what's broken" and "what am I working on" are
-    # questions about his code, and his code is the only written record he has.
+    # Deploys before repos, because "what's broken" asked out loud usually
+    # means something is on fire now, and something live being down beats a
+    # red test suite for urgency. Naming CI or a repo still routes to repos.
+    ("check_deploys", r"\b(railway|deploy(ed|ment|s|ing)?|is (it|the site|the app|everything) "
+                      r"(up|down|live|broken|ok)|anything (down|broken)|production|prod\b"
+                      r"|what'?s (broken|down)|did (my|the) deploy)\b"),
     ("check_repos", r"\b(repos?|repositor(y|ies)|github|pull requests?|\bprs?\b|ci\b"
-                    r"|build(s| status)?|what'?s (broken|failing|red)|failing tests?"
+                    r"|build(s| status)?|failing tests?|what'?s (failing|red)"
                     r"|what did i (commit|push|work on|build)|my (code|commits))\b"),
     # plan_day is tested before brief_me: "plan my day" contains "my day".
     ("plan_day", r"\bplan (my |the )?(day|today|week|morning)\b|\bwhat should i (do|work on|focus on|start with)\b"

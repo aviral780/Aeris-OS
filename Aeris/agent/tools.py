@@ -808,6 +808,80 @@ def github_issue(v, repo="", title="", body="", **_):
                   reason="asked to open a GitHub issue")
 
 
+# --------------------------------------------------------------------------
+# 11. check_deploys — is anything live actually broken
+# --------------------------------------------------------------------------
+
+def check_deploys(v, **_):
+    from . import railway
+    if not railway.configured():
+        return _tool("check_deploys",
+                     "Aviral, SIR — no Railway token is set, so I can't see your deploys.",
+                     {"title": "check_deploys — not connected",
+                      "note": "Add RAILWAY_TOKEN to Aeris/.env. Get one at "
+                              "railway.com/account/tokens.",
+                      "degraded": True})
+
+    out, err = railway.overview()
+    if err:
+        return _tool("check_deploys",
+                     "Aviral, SIR — Railway wouldn't answer, so I don't know. %s" % err,
+                     {"title": "check_deploys — failed", "note": err, "degraded": True})
+
+    broken, flight, live = out["broken"], out["in_flight"], out["live"]
+    items = []
+    for row in broken:
+        items.append({"title": "%s · %s — %s" % (row["project"], row["service"],
+                                                 row["status"]),
+                      "subtitle": "last deploy %s" % (row["age"] or "unknown"),
+                      "url": row["url"], "meta": "broken", "flagged": True})
+    for row in flight:
+        items.append({"title": "%s · %s — %s" % (row["project"], row["service"],
+                                                 row["status"]),
+                      "subtitle": "started %s" % (row["age"] or "just now"),
+                      "url": row["url"], "meta": "in flight"})
+    for row in live:
+        items.append({"title": "%s · %s" % (row["project"], row["service"]),
+                      "subtitle": "live, deployed %s" % (row["age"] or "unknown"),
+                      "url": row["url"], "meta": "live"})
+
+    rows = [
+        {"k": "Broken", "v": ("<b>%d</b> down" % len(broken)) if broken else "nothing down"},
+        {"k": "Deploying", "v": ("<b>%d</b> in flight" % len(flight))
+                                if flight else "nothing mid-deploy"},
+        {"k": "Live", "v": "<b>%d</b> %s up" % (len(live), _plural(len(live), "service"))},
+    ]
+
+    if broken:
+        first = broken[0]
+        spoken = ("Aviral, SIR — %s on %s is %s, since %s. That's the one to look at."
+                  % (first["service"], first["project"], first["status"].lower(),
+                     first["age"] or "some time ago"))
+    elif flight:
+        spoken = ("Aviral, SIR — nothing broken. %d %s still deploying."
+                  % (len(flight), _plural(len(flight), "service")))
+    elif live:
+        spoken = ("Aviral, SIR — all %d %s up on Railway. Nothing to do."
+                  % (len(live), _plural(len(live), "service")))
+    else:
+        spoken = ("Aviral, SIR — Railway has %d %s but nothing deployed in them."
+                  % (out["projects"], _plural(out["projects"], "project")))
+
+    # A project that could not be read is not a project that is fine.
+    if out["problems"]:
+        spoken += " Some projects I couldn't read at all — that's on screen."
+
+    return _tool("check_deploys", spoken, {
+        "title": "check_deploys",
+        "subtitle": "%d %s on Railway" % (out["projects"],
+                                          _plural(out["projects"], "project")),
+        "rows": rows,
+        "items": items,
+        "injection": [{"file": "railway", "line": p} for p in out["problems"]],
+        "note": "Read-only. Aeris cannot redeploy or restart anything on Railway.",
+    })
+
+
 def run_command(v, command="", cwd="", **_):
     return _gated("run_command", {"command": command, "cwd": cwd},
                   "done.", "run_command", reason="asked to run a command")
@@ -836,6 +910,7 @@ REGISTRY = {
     "log_today": log_today,
     "check_repos": check_repos,
     "github_issue": github_issue,
+    "check_deploys": check_deploys,
 }
 
 

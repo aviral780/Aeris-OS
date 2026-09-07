@@ -225,6 +225,25 @@ class RailwayTest(unittest.TestCase):
                         if __import__("re").search(pattern, question.lower())), None)
             self.assertEqual(hit, "check_deploys", question)
 
+    def test_his_real_questions_reach_his_real_connectors(self):
+        """The vault is empty and will be for a while, so a question about his
+        actual work has to reach GitHub or Notion rather than falling through
+        to a file search that can only ever answer "nothing". This is the exact
+        set of phrasings that failed live."""
+        import re
+        for question, expected in (
+            ("what am I working on", "check_repos"),
+            ("what am I building", "check_repos"),
+            ("is scamshield failing", "check_repos"),
+            ("what is in my notion", "search_notion"),
+            ("what are my projects", "search_notion"),
+            ("show me my job tracker", "search_notion"),
+            ("what are my skills", "search_notion"),
+        ):
+            hit = next((name for name, pattern in llm.TOOL_CUES
+                        if re.search(pattern, question.lower())), None)
+            self.assertEqual(hit, expected, question)
+
     def test_asking_about_ci_still_routes_to_repos(self):
         import re
         for question in ("any open prs?", "what's failing in ci?", "my repos"):

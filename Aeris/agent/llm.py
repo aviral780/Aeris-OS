@@ -432,9 +432,20 @@ TOOL_CUES = [
     ("check_deploys", r"\b(railway|deploy(ed|ment|s|ing)?|is (it|the site|the app|everything) "
                       r"(up|down|live|broken|ok)|anything (down|broken)|production|prod\b"
                       r"|what'?s (broken|down)|did (my|the) deploy)\b"),
+    # Notion before repos: he keeps the project list, job tracker and skills
+    # there, so a question naming those means Notion even though "projects"
+    # could otherwise read as code. Nothing routed here at all before — the
+    # connector existed with no way to reach it without a model call.
+    ("search_notion", r"\b(notion|job tracker|my skills|skill list|project (list|bank|idea)"
+                      r"|(what|which) projects|my projects|projects i (want|plan|need)"
+                      r"|fuinnotech|future os)\b"),
     ("check_repos", r"\b(repos?|repositor(y|ies)|github|pull requests?|\bprs?\b|ci\b"
                     r"|build(s| status)?|failing tests?|what'?s (failing|red)"
-                    r"|what did i (commit|push|work on|build)|my (code|commits))\b"),
+                    r"|what did i (commit|push|work on|build)|my (code|commits)"
+                    # "what am I working on" is a question about his code, and
+                    # it fell through to the vault — which is empty — and
+                    # answered "nothing", which was true and useless.
+                    r"|what am i (working on|building)|scamshield|scam shield)\b"),
     # plan_day is tested before brief_me: "plan my day" contains "my day".
     ("plan_day", r"\bplan (my |the )?(day|today|week|morning)\b|\bwhat should i (do|work on|focus on|start with)\b"
                  r"|\bpriorit(y|ies|ise|ize)\b|\bmy to.?do\b|\bwhat'?s next\b|\bwhere do i start\b"),

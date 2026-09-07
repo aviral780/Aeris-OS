@@ -228,6 +228,25 @@ def handle_turn(question):
 # status
 # --------------------------------------------------------------------------
 
+def _safe_status(label, mod):
+    """mod.status() reaches out to a real external service, and a real
+    service can fail in a way its own client code never anticipated —
+    exactly what happened here: a stray character in a Railway token crashed
+    urllib deep inside http.client, several layers below anything railway.py
+    itself catches. Uncaught, that took the whole server down before it ever
+    bound the port, and would otherwise have crashed /api/status on every
+    single page load thereafter until the token was fixed by hand.
+
+    Whatever the failure, this guarantees the same shape a clean failure
+    already returns, so no caller needs to know the difference.
+    """
+    try:
+        return mod.status()
+    except Exception as exc:                                       # noqa: BLE001
+        return {"ok": False, "free": True,
+                "detail": "%s crashed: %s: %s" % (label, type(exc).__name__, exc)}
+
+
 def status_payload():
     v = vault_mod.get()
     st = llm.probe()
@@ -263,10 +282,10 @@ def status_payload():
                            if not metered else
                            "Metered: %s. Everything else is free." % ", ".join(metered)},
         "actions": actions.status(),
-        "github": github.status(),
-        "railway": railway.status(),
-        "google": google.status(),
-        "notion": notion.status(),
+        "github": _safe_status("github", github),
+        "railway": _safe_status("railway", railway),
+        "google": _safe_status("google", google),
+        "notion": _safe_status("notion", notion),
         "usage": voice.usage(),
         "turn": STATE["turn"],
         "server_time": datetime.now().isoformat(timespec="seconds"),
@@ -512,11 +531,10 @@ def banner(v, port):
     roots = actions.write_roots()
     print("  hands     %s" % ("can write in %s" % ", ".join(str(r) for r in roots)
                               if roots else "\033[93mread-only — set AERIS_WRITE_ROOTS\033[0m"))
-    gh = github.status()
-    print("  github    %s" % (gh["detail"] if gh["ok"]
-                              else "\033[93m%s\033[0m" % gh["detail"]))
-    for label, mod in (("railway", railway), ("google", google), ("notion", notion)):
-        st = mod.status()
+    # One connector misbehaving must never stop Aeris from starting at all.
+    for label, mod in (("github", github), ("railway", railway),
+                       ("google", google), ("notion", notion)):
+        st = _safe_status(label, mod)
         print("  %-9s %s" % (label, st["detail"] if st["ok"]
                              else "\033[93m%s\033[0m" % st["detail"]))
     print("  model     %s" % ("%s (%s)" % (st["model"], st["detail"]) if st["ok"]

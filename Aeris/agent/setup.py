@@ -139,6 +139,27 @@ def set_value(key, value):
     return True
 
 
+def _header_safe(value):
+    """Whether this can ever be sent as an HTTP header value at all.
+
+    Every one of these keys ends up in an Authorization or similar header in
+    some connector's client. This is the check that would have caught, at the
+    moment of entry, a token that instead went on to crash the running server
+    with a bare UnicodeEncodeError two layers down inside urllib — a stray
+    character picked up from copy-paste, most likely from a decorated
+    terminal prompt riding along with the paste.
+    """
+    try:
+        value.encode("latin-1")
+        return True, ""
+    except UnicodeEncodeError as exc:
+        bad = exc.object[exc.start:exc.end]
+        return False, ("contains %r at position %d, which can't be sent in an HTTP "
+                       "header. Almost certainly picked up from copy-paste — copy it "
+                       "again, freshly, watching the very start and end."
+                       % (bad, exc.start))
+
+
 def enter_secrets():
     """Type each key straight into .env, echoing nothing.
 
@@ -163,6 +184,10 @@ def enter_secrets():
             print("\n  Stopped. Nothing further was written.")
             break
         if value:
+            safe, why = _header_safe(value)
+            if not safe:
+                print("  \033[91mrefused\033[0m — %s\n" % why)
+                continue
             set_value(key, value)
             changed.append(key)
             print("  set, %d characters.\n" % len(value))

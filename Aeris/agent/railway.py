@@ -90,8 +90,26 @@ def _query(query, variables=None, cache_key=""):
         if hit and now - hit[0] < CACHE_SECONDS:
             return hit[1], None
 
+    headers = _headers()
+    # HTTP headers can only carry latin-1. A token corrupted by copy-paste —
+    # this is exactly what happened live: a stray "❯" landed in
+    # RAILWAY_TOKEN — crashes several layers down inside http.client with a
+    # bare UnicodeEncodeError that has nothing to do with Railway at all, and
+    # nothing above catches it as a URLError or OSError. Checked here,
+    # up front, so the message names the actual problem instead of a
+    # traceback naming a stdlib internal.
+    try:
+        for value in headers.values():
+            value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        return None, ("RAILWAY_TOKEN contains a character (%r) that can't be sent in an "
+                      "HTTP header — almost certainly picked up by copy-paste. Copy it "
+                      "fresh from railway.com/account/tokens, watching for stray "
+                      "characters at either end, and re-enter it with "
+                      "`python3 -m agent.setup --secrets`." % exc.object[exc.start:exc.end])
+
     body = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
-    req = urllib.request.Request(API, data=body, method="POST", headers=_headers())
+    req = urllib.request.Request(API, data=body, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             raw = resp.read()

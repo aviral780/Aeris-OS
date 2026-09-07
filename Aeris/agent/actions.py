@@ -274,6 +274,11 @@ def _draft_email(**args):
     return google.create_draft(**args)
 
 
+def _create_calendar_event(**args):
+    from . import google
+    return google.create_event(**args)
+
+
 # --------------------------------------------------------------------------
 # registry
 # --------------------------------------------------------------------------
@@ -321,6 +326,12 @@ register(Capability("github_comment", _github_comment, CONFIRM,
 # an account outside this machine, so it still stops and asks.
 register(Capability("draft_email", _draft_email, CONFIRM,
                     "Save a draft in Gmail. Never sends. Always asks first.",
+                    outward=True))
+# Visible the instant it is created, unlike a draft — and, unlike a draft,
+# has no way to invite anyone, since Google emails an invite the moment an
+# attendee is added. Still stops and asks: it writes to his real calendar.
+register(Capability("create_calendar_event", _create_calendar_event, CONFIRM,
+                    "Add an event to his calendar. Always asks first.",
                     outward=True))
 
 
@@ -398,6 +409,9 @@ def _describe(name, args):
     if name == "draft_email":
         return "Save a Gmail draft to %s — “%s” (not sent)" % (
             args.get("to", ""), args.get("subject", ""))
+    if name == "create_calendar_event":
+        return "Add to your calendar: “%s” on %s at %s" % (
+            args.get("title", ""), args.get("date", ""), args.get("time", ""))
     return "%s %s" % (name, json.dumps(args, default=str)[:160])
 
 

@@ -257,6 +257,17 @@ TOOL_SCHEMA = [
      "input_schema": {"type": "object", "properties": {
          "to": {"type": "string"}, "subject": {"type": "string"},
          "body": {"type": "string"}}, "required": ["to", "subject", "body"]}},
+    {"name": "calendar_event",
+     "description": "Add an event to his Google Calendar. Visible immediately, unlike a "
+                    "draft — there is no way to invite anyone through this, only him. "
+                    "Always stops and asks him first.",
+     "input_schema": {"type": "object", "properties": {
+         "title": {"type": "string"},
+         "date": {"type": "string", "description": "YYYY-MM-DD"},
+         "time": {"type": "string", "description": "HH:MM, 24-hour, his local time"},
+         "duration_minutes": {"type": "integer"},
+         "description": {"type": "string"}},
+         "required": ["title", "date", "time"]}},
     {"name": "search_notion",
      "description": "Search his Notion workspace and read the closest page. Only sees "
                     "pages he has shared with the integration. Read-only.",

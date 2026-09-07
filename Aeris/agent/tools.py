@@ -808,6 +808,14 @@ def draft_email(v, to="", subject="", body="", **_):
                   reason="asked to draft an email")
 
 
+def calendar_event(v, title="", date="", time="", duration_minutes=30, description="", **_):
+    return _gated("create_calendar_event",
+                  {"title": title, "date": date, "time": time,
+                   "duration_minutes": duration_minutes, "description": description},
+                  "added to your calendar.", "create_calendar_event",
+                  reason="asked to add a calendar event")
+
+
 def github_issue(v, repo="", title="", body="", **_):
     return _gated("github_create_issue", {"repo": repo, "title": title, "body": body},
                   "issue opened.", "github_create_issue",
@@ -967,6 +975,7 @@ REGISTRY = {
     "check_deploys": check_deploys,
     "search_notion": search_notion,
     "draft_email": draft_email,
+    "calendar_event": calendar_event,
 }
 
 

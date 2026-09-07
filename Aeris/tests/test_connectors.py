@@ -6,6 +6,8 @@ rule like that is not a prompt or a permission check but the absence of the
 code: there is no send function in google.py, and this asserts it stays that
 way even if someone later grants the scope that would allow one.
 """
+import io
+import json
 import os
 import sys
 import tempfile
@@ -15,6 +17,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import actions, data, google, notion  # noqa: E402
+
+
+class FakeResp(io.BytesIO):
+    def __init__(self):
+        super().__init__(json.dumps({"id": "evt1", "htmlLink": "u"}).encode())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
 
 
 class NoSendTest(unittest.TestCase):
@@ -50,6 +63,71 @@ class NoSendTest(unittest.TestCase):
         out = google.create_draft(to="a@b.com", subject="hi", body="x")
         self.assertFalse(out["ok"])
         self.assertIn("GOOGLE_ALLOW_DRAFTS", out["summary"])
+
+
+class CalendarEventTest(unittest.TestCase):
+    def test_there_is_no_way_to_invite_anyone(self):
+        """Google emails an invite the instant an attendee is added to an
+        event. That would be a second, quieter send path, so the function
+        cannot accept one, and calling it with one changes nothing sent."""
+        import inspect
+        self.assertNotIn("attendees", inspect.signature(google.create_event).parameters)
+
+        os.environ["GOOGLE_ALLOW_CALENDAR_WRITE"] = "1"
+        data.reload_env()
+        captured = []
+        real_access = google._access_token
+        google._access_token = lambda: ("fake-token", None)
+        google.urllib.request.urlopen = lambda req, timeout=None: captured.append(
+            json.loads(req.data.decode())) or FakeResp()
+        try:
+            # attendees lands in **_ and is silently discarded — this proves
+            # it, rather than trusting that it does.
+            google.create_event(title="x", date="2026-09-10", time="09:00",
+                                attendees=["someone@example.com"])
+        finally:
+            google._access_token = real_access
+            os.environ.pop("GOOGLE_ALLOW_CALENDAR_WRITE", None)
+            data.reload_env()
+        self.assertNotIn("attendees", captured[0])
+
+    def test_calendar_writing_is_off_by_default(self):
+        os.environ.pop("GOOGLE_ALLOW_CALENDAR_WRITE", None)
+        data.reload_env()
+        self.assertFalse(google.calendar_write_allowed())
+        out = google.create_event(title="Standup", date="2026-09-10", time="09:00")
+        self.assertFalse(out["ok"])
+        self.assertIn("GOOGLE_ALLOW_CALENDAR_WRITE", out["summary"])
+
+    def test_a_bad_date_or_time_is_refused_before_any_network_call(self):
+        os.environ["GOOGLE_ALLOW_CALENDAR_WRITE"] = "1"
+        data.reload_env()
+        try:
+            out = google.create_event(title="x", date="not-a-date", time="09:00")
+            self.assertFalse(out["ok"])
+            self.assertIn("YYYY-MM-DD", out["summary"])
+        finally:
+            os.environ.pop("GOOGLE_ALLOW_CALENDAR_WRITE", None)
+            data.reload_env()
+
+    def test_creating_an_event_still_stops_and_asks(self):
+        cap = actions.REGISTRY["create_calendar_event"]
+        self.assertEqual(cap.risk, actions.CONFIRM)
+        self.assertTrue(cap.outward)
+
+    def test_no_event_is_created_before_approval(self):
+        called = []
+        real = google.create_event
+        google.create_event = lambda **kw: called.append(kw) or {"ok": True, "summary": "added"}
+        try:
+            out = actions.propose("create_calendar_event",
+                                  {"title": "Standup", "date": "2026-09-10", "time": "09:00"})
+            self.assertEqual(out["status"], "needs_confirmation")
+            self.assertEqual(called, [])
+            actions.confirm(out["token"], approved=True)
+            self.assertEqual(len(called), 1)
+        finally:
+            google.create_event = real
 
 
 class DraftGateTest(unittest.TestCase):

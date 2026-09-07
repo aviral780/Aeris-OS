@@ -55,6 +55,10 @@ READ_SCOPES = [
 # Google has no draft-only scope: gmail.compose permits sending too. Requested
 # only when he asks for it, and even then nothing here can send.
 DRAFT_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
+# calendar.events is read/write on events specifically — narrower than the
+# bare `calendar` scope, which also covers deleting calendars and changing
+# sharing settings. Requested only when he opts in.
+CALENDAR_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 
 _access = {"token": "", "expires": 0}
 
@@ -68,11 +72,17 @@ def scopes():
     out = list(READ_SCOPES)
     if data.env("GOOGLE_ALLOW_DRAFTS", "").strip() in ("1", "true", "yes", "on"):
         out.append(DRAFT_SCOPE)
+    if data.env("GOOGLE_ALLOW_CALENDAR_WRITE", "").strip() in ("1", "true", "yes", "on"):
+        out.append(CALENDAR_WRITE_SCOPE)
     return out
 
 
 def drafts_allowed():
     return DRAFT_SCOPE in scopes()
+
+
+def calendar_write_allowed():
+    return CALENDAR_WRITE_SCOPE in scopes()
 
 
 def _read_token():
@@ -386,6 +396,57 @@ def events(days=1):
             "url": item.get("htmlLink", ""),
         })
     return out, None
+
+
+def create_event(title="", date="", time="", duration_minutes=30, description="", **_):
+    """One calendar event. Visible the moment it is created — this is not a
+    draft sitting quietly until he acts on it, the way a Gmail draft is.
+
+    There is deliberately no `attendees` parameter, and never will be:
+    Google emails an invite the instant an attendee is added to an event,
+    which would make this a second, quieter way to send something after the
+    entire point of create_draft was that nothing in this module ever does.
+    If he wants to invite someone, that happens in Calendar itself, by him.
+    """
+    if not calendar_write_allowed():
+        return {"ok": False, "summary": "Calendar writing is off. Set "
+                                        "GOOGLE_ALLOW_CALENDAR_WRITE=1 in Aeris/.env "
+                                        "and sign in again to enable it."}
+    if not title or not date or not time:
+        return {"ok": False, "summary": "Need a title, a date (YYYY-MM-DD) and a "
+                                        "time (HH:MM, 24-hour)."}
+    try:
+        naive = datetime.strptime("%s %s" % (date, time), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return {"ok": False, "summary": "Date must be YYYY-MM-DD and time HH:MM, 24-hour."}
+    start = naive.astimezone()              # this machine's real timezone
+    end = start + timedelta(minutes=max(5, duration_minutes))
+
+    token, err = _access_token()
+    if err:
+        return {"ok": False, "summary": err}
+
+    payload = json.dumps({
+        "summary": title,
+        "description": description or "",
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": end.isoformat()},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "%s/calendars/primary/events" % CALENDAR, data=payload, method="POST",
+        headers={"Authorization": "Bearer %s" % token,
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            got = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "summary": "Calendar refused that: %s"
+                                        % exc.read().decode("utf-8", errors="replace")[:200]}
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"ok": False, "summary": "Could not reach Calendar (%s)." % exc}
+    return {"ok": True, "id": got.get("id", ""), "url": got.get("htmlLink", ""),
+            "summary": "Added “%s” to your calendar, %s at %s."
+                       % (title, date, time)}
 
 
 def status():

@@ -16,6 +16,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -86,6 +87,48 @@ class SafeStatusTest(unittest.TestCase):
             os.environ.pop("RAILWAY_TOKEN", None)
             data.reload_env()
         self.assertFalse(out["ok"])
+
+
+class ServerAlwaysBindsTest(unittest.TestCase):
+    """The narrower fix only protected the four connectors banner() already
+    knew about. This is the actual guarantee that has to hold: main() calls
+    banner() before it ever creates the HTTP server, so ANY exception from
+    ANY line inside banner() — known today or not — must not be able to
+    prevent the port from being bound. Proven here with an exception type
+    that has nothing to do with Railway or any existing connector, so this
+    is not just a second regression test for the same bug."""
+
+    def test_the_server_binds_even_when_the_banner_raises_something_new(self):
+        real_banner = main.banner
+
+        class NeverSeenBefore(Exception):
+            pass
+
+        def exploding_banner(v, port):
+            raise NeverSeenBefore("a kind of failure nothing here anticipated")
+
+        bound = {}
+
+        class FakeServer:
+            def __init__(self, addr, handler):
+                bound["addr"] = addr
+            daemon_threads = False
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                pass
+
+        try:
+            main.banner = exploding_banner
+            with mock.patch.object(main, "ThreadingHTTPServer", FakeServer), \
+                 mock.patch.object(sys, "argv", ["agent.main", "--no-open"]), \
+                 mock.patch.object(main.data, "env",
+                                   side_effect=lambda k, d="": {"PORT": "9998"}.get(k, d)):
+                main.main()
+        finally:
+            main.banner = real_banner
+
+        self.assertEqual(bound.get("addr"), ("127.0.0.1", 9998))
 
 
 if __name__ == "__main__":

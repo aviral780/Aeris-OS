@@ -507,7 +507,15 @@ def ensure_demo_data():
 
 
 def banner(v, port):
-    st = llm.probe()
+    try:
+        st = llm.probe()
+    except Exception as exc:                                       # noqa: BLE001
+        # llm.probe() is the one status-ish call in this function that was
+        # not already behind _safe_status — everything below it was, after
+        # the last failure, and this was the gap that let the same category
+        # of bug through a different door.
+        st = {"ok": False, "free": True, "backend": "none", "model": "",
+              "detail": "crashed: %s: %s" % (type(exc).__name__, exc)}
     print()
     print("  \033[96mAERIS\033[0m  ·  http://localhost:%d" % port)
     print("  " + "─" * 56)
@@ -550,7 +558,20 @@ def main():
     ensure_demo_data()
     v = vault_mod.get()
     port = int(data.env("PORT", "4719"))
-    banner(v, port)
+    # The banner is diagnostic printout. It reads from six independent
+    # subsystems, several of which reach out to real, unpredictable services
+    # — and diagnostic printout failing must never be the reason the actual
+    # server doesn't run. This already happened once with a narrower fix; the
+    # general guarantee belongs here, at the one place that decides whether
+    # the port ever gets bound at all, not spread across every individual
+    # call banner() happens to make today.
+    try:
+        banner(v, port)
+    except Exception as exc:                                       # noqa: BLE001
+        print("\n  \033[91mThe startup banner failed: %s: %s\033[0m"
+              % (type(exc).__name__, exc))
+        print("  Starting anyway — /api/status will show the same detail once "
+              "she's up.\n")
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True

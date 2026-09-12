@@ -85,86 +85,194 @@
 
   /* ------------------------------------------------------------ reactor */
   const rctx = el.reactor.getContext('2d');
-  const R_SIZE = 396, R_MID = R_SIZE / 2;
+  const R_SIZE = 860, R_MID = R_SIZE / 2;   // backing store; CSS halves it
   let rPhase = 0;
+
+  /* Frequency, not just volume.
+
+     `level` is one number — how loud. That can only ever make a shape
+     bigger and smaller. Bands say *what* was said: a vowel loads the low
+     bins, a consonant snaps the high ones, so the field can move in a
+     pattern that belongs to this sentence rather than pulsing uniformly.
+
+     Read from whichever analyser is live: his microphone while listening,
+     her own output while speaking. Smoothed across frames, because raw FFT
+     output at 60fps looks like static rather than speech. */
+  const BANDS = 24;
+  const bandOut = new Array(BANDS).fill(0);
+  let freqBuf = null;
+
+  function bandData() {
+    const node = (state === 'speaking' || isPlaying()) ? outAnalyser : analyser;
+    if (!node) {
+      for (let i = 0; i < BANDS; i++) bandOut[i] *= 0.85;
+      return bandOut;
+    }
+    if (!freqBuf || freqBuf.length !== node.frequencyBinCount) {
+      freqBuf = new Uint8Array(node.frequencyBinCount);
+    }
+    node.getByteFrequencyData(freqBuf);
+    // Speech lives in roughly the bottom third of the spectrum, so the bins
+    // above that are mostly silence — spreading bands evenly across all of
+    // them wastes most of the field on nothing.
+    const usable = Math.floor(freqBuf.length * 0.42);
+    const per = Math.max(1, Math.floor(usable / BANDS));
+    for (let b = 0; b < BANDS; b++) {
+      let sum = 0;
+      for (let k = 0; k < per; k++) sum += freqBuf[b * per + k] || 0;
+      const now = (sum / per) / 255;
+      // Attack fast, release slow — the same asymmetry the field uses.
+      bandOut[b] = now > bandOut[b] ? now : bandOut[b] * 0.82 + now * 0.18;
+    }
+    return bandOut;
+  }
+
+  /* The field is optional decoration. If field.js failed to load, every
+     caller still works rather than throwing once per frame. */
+  const Field = window.AerisField || { push: function () {} };
+
+  /* The orb: a sphere drawn entirely in dots, plus a petal ring around it.
+
+     Latitude and longitude bands on a real sphere, rotated about the vertical
+     axis and projected flat. That is what makes it read as a solid object made
+     of points rather than a flat ring of dots — the far side is dimmer and
+     smaller because its z is negative, and it turns on its own so the shape is
+     alive before anyone speaks.
+
+     Each dot carries a frequency band, assigned by longitude, so a sound
+     pushes one meridian of the sphere outwards instead of inflating the whole
+     thing evenly. Speech has shape; this shows it. */
+  const ORB = (function () {
+    const out = [];
+    // A Fibonacci sphere, not latitude rings. Rings put every dot in a row
+    // with its neighbours, and the eye picks those rows out instantly as
+    // horizontal banding — it stops looking like a surface and starts
+    // looking like stacked bracelets. Spacing points by the golden angle
+    // covers the sphere evenly with no visible structure at all.
+    const N = 900;
+    for (let i = 0; i < N; i++) {
+      const y = 1 - (i / (N - 1)) * 2;          // -1 .. 1
+      const ring = Math.sqrt(Math.max(0, 1 - y * y));
+      const theta = i * 2.39996323;             // golden angle
+      out.push({
+        kind: 'sphere', y: y, ring: ring, theta: theta,
+        band: Math.floor(((theta % 6.2832) / 6.2832) * BANDS) % BANDS,
+        seed: Math.random() * 6.2832
+      });
+    }
+    // The petal ring — a rose curve, r = 1 + k·cos(5θ). Five lobes, because
+    // an even number reads as a flower and an odd one reads as a crest.
+    const PETALS = 150;
+    for (let i = 0; i < PETALS; i++) {
+      const a = (i / PETALS) * Math.PI * 2;
+      out.push({
+        kind: 'petal', ang: a,
+        rose: 0.86 + 0.14 * Math.cos(a * 5),
+        band: Math.floor(((a % 6.2832) / 6.2832) * BANDS) % BANDS,
+        seed: Math.random() * 6.2832
+      });
+    }
+    return out;
+  }());
+
+  const VIOLET = [168, 85, 247], AZURE = [56, 189, 248];
+
+  function mixRGB(a, b, t) {
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  }
+  function rgbaOf(col, alpha) {
+    return 'rgba(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ',' + alpha + ')';
+  }
 
   function drawReactor() {
     const c = rctx;
     c.clearRect(0, 0, R_SIZE, R_SIZE);
     rPhase += 0.014;
 
-    const palette = {
-      idle:      ['#35e0f0', 0.30],
-      // Awake but not listening to him. Dimmer than listening on purpose —
-      // the ring should not look like it is taking anything in.
-      waiting:   ['#8a7bd8', 0.45],
-      listening: ['#35e0f0', 1.00],
-      thinking:  ['#f6b73c', 0.85],
-      speaking:  ['#7ef0a0', 0.95],
-      error:     ['#ff5c72', 0.90]
-    }[state] || ['#35e0f0', 0.3];
-    const col = palette[0], energy = palette[1];
-    const react = state === 'listening' ? Math.min(1, level * 9)
-                : state === 'speaking' ? Math.min(1, level * 7)
-                : 0;
+    const bands = bandData();
+    const energy = {
+      idle: 0.30, waiting: 0.45, listening: 1.00,
+      thinking: 0.85, speaking: 0.95, error: 0.90
+    }[state] || 0.30;
+    const lively = state === 'listening' || state === 'speaking';
+    const react = lively ? Math.min(1, level * (state === 'listening' ? 9 : 7)) : 0;
 
-    /* outer tick ring */
+    // The whole field and the orb drift together between violet and azure,
+    // so they read as one instrument rather than two widgets.
+    const hue = (Math.sin(rPhase * 0.42) + 1) / 2;
+    const base = state === 'error' ? [255, 92, 114]
+               : state === 'thinking' ? mixRGB(VIOLET, [246, 183, 60], 0.45)
+               : mixRGB(VIOLET, AZURE, hue);
+
+    Field.push(state, react || (state === 'thinking' ? 0.22 : 0.05), lively ? bands : null);
+
     c.save(); c.translate(R_MID, R_MID);
-    const ticks = 72;
-    for (let i = 0; i < ticks; i++) {
-      const a = (i / ticks) * Math.PI * 2 - Math.PI / 2;
-      const wave = Math.sin(rPhase * 2 + i * 0.4);
-      const len = 8 + (state === 'idle' ? wave * 1.5 : wave * 4 * energy) + react * 12;
-      const r0 = 176, r1 = r0 - Math.max(3, len);
-      c.beginPath();
-      c.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
-      c.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
-      c.strokeStyle = 'rgba(255,255,255,' + (0.05 + 0.10 * energy) + ')';
-      c.lineWidth = 1.4; c.stroke();
-    }
 
-    /* rings */
-    [[152, 0.11], [128, 0.07]].forEach(function (r) {
-      c.beginPath(); c.arc(0, 0, r[0], 0, 6.2832);
-      c.strokeStyle = 'rgba(255,255,255,' + r[1] + ')'; c.lineWidth = 1; c.stroke();
-    });
+    /* core glow, behind the dots so they read as sitting in front of it */
+    const coreR = R_MID * 0.42 + react * 18 + Math.sin(rPhase * 1.6) * 3;
+    const grad = c.createRadialGradient(0, 0, 4, 0, 0, coreR);
+    grad.addColorStop(0, rgbaOf(base, 0.20 + 0.30 * energy));
+    grad.addColorStop(0.55, rgbaOf(base, 0.05));
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    c.beginPath(); c.arc(0, 0, coreR, 0, 6.2832); c.fillStyle = grad; c.fill();
+
+    const R = R_MID * 0.68;            // sphere radius
+    const spin = rPhase * 0.55;        // it turns whether or not anyone speaks
+
+    for (let i = 0; i < ORB.length; i++) {
+      const d = ORB[i];
+      const b = lively ? (bands[d.band] || 0) : 0;
+      let x, y, depth, s, alpha;
+
+      if (d.kind === 'sphere') {
+        const lon = d.theta + spin;
+        const sx = d.ring * Math.sin(lon);
+        const sz = d.ring * Math.cos(lon);      // -1 far, +1 near
+        // Voice pushes the dot out along its own surface normal.
+        const swell = 1 + b * 0.30 + react * 0.06
+                    + Math.sin(rPhase * 1.4 + d.seed) * 0.012;
+        x = sx * R * swell;
+        y = d.y * R * swell;
+        depth = (sz + 1) / 2;                   // 0 far .. 1 near
+        // Sizes are in backing-store pixels, and the backing store is twice
+        // the CSS size for retina — so these are roughly half what they look.
+        s = (1.5 + depth * 2.6) * (1 + b * 1.4);
+        alpha = (0.22 + depth * 0.6) * (0.6 + energy * 0.7) + b * 0.4;
+      } else {
+        const a = d.ang - spin * 0.35;          // counter-rotates, slower
+        const rr = R * 1.34 * d.rose
+                 * (1 + b * 0.16 + Math.sin(rPhase * 1.1 + d.seed) * 0.018);
+        x = Math.cos(a) * rr;
+        y = Math.sin(a) * rr;
+        depth = 0.75;
+        s = (2.1 + b * 5.2) * (1 + react * 0.3);
+        alpha = (0.14 + energy * 0.26) + b * 0.45;
+      }
+
+      if (alpha > 0.95) alpha = 0.95;
+      const col = mixRGB(base, [236, 110, 240], b > 0.6 ? (b - 0.6) * 2 : 0);
+      c.fillStyle = rgbaOf(col, alpha);
+      c.beginPath(); c.arc(x, y, s, 0, 6.2832); c.fill();
+    }
 
     /* the state arc — sweeps while thinking, pulses otherwise */
     const sweep = state === 'thinking' ? 1.5 : (0.7 + react * 1.8);
     const start = state === 'thinking' ? rPhase * 2.4 : -Math.PI / 2 - sweep / 2;
-    c.beginPath(); c.arc(0, 0, 152, start, start + sweep);
-    c.strokeStyle = col; c.lineWidth = 2.4; c.lineCap = 'round';
-    c.shadowColor = col; c.shadowBlur = 16 * energy; c.stroke(); c.shadowBlur = 0;
+    c.beginPath(); c.arc(0, 0, R * 1.62, start, start + sweep);
+    c.strokeStyle = rgbaOf(base, 0.85); c.lineWidth = 2.2; c.lineCap = 'round';
+    c.shadowColor = rgbaOf(base, 1); c.shadowBlur = 18 * energy; c.stroke(); c.shadowBlur = 0;
 
-    /* amber counter-arc, always present, quiet */
-    c.beginPath();
-    c.arc(0, 0, 165, -rPhase * 0.6, -rPhase * 0.6 + 0.9);
-    c.strokeStyle = 'rgba(246,183,60,0.42)'; c.lineWidth = 1.6; c.stroke();
-
-    /* core */
-    const coreR = 74 + react * 12 + Math.sin(rPhase * 1.6) * 2;
-    const grad = c.createRadialGradient(0, 0, 4, 0, 0, coreR);
-    grad.addColorStop(0, hexA(col, 0.30 + 0.34 * energy));
-    grad.addColorStop(0.6, hexA(col, 0.07));
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    c.beginPath(); c.arc(0, 0, coreR, 0, 6.2832); c.fillStyle = grad; c.fill();
-    c.beginPath(); c.arc(0, 0, 96, 0, 6.2832);
-    c.strokeStyle = hexA(col, 0.30 + 0.4 * energy); c.lineWidth = 1.2; c.stroke();
-
-    /* wordmark */
+    /* wordmark, under the sphere rather than through it */
     c.textAlign = 'center'; c.textBaseline = 'middle';
-    c.font = '700 25px -apple-system, Inter, Segoe UI, sans-serif';
-    c.letterSpacing = '10px';
-    c.fillStyle = hexA(col, 0.55 + 0.4 * energy);
-    c.shadowColor = col; c.shadowBlur = 12 * energy;
-    c.fillText('AERIS', 5, 0);
+    c.font = '700 22px -apple-system, Inter, Segoe UI, sans-serif';
+    c.letterSpacing = '14px';
+    c.fillStyle = rgbaOf(base, 0.5 + 0.4 * energy);
+    c.shadowColor = rgbaOf(base, 1); c.shadowBlur = 14 * energy;
+    c.fillText('AERIS', 7, R * 1.62 + 34);
     c.shadowBlur = 0;
     c.restore();
     requestAnimationFrame(drawReactor);
-  }
-  function hexA(hex, a) {
-    const n = parseInt(hex.slice(1), 16);
-    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
   }
 
   function setState(s) {

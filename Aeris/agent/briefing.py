@@ -15,6 +15,7 @@ his projects instead of from nothing. The live tools still exist and still
 give the detailed, current answer — this is only what she starts already
 knowing, so a plain "what am I working on" doesn't depend on a regex match.
 """
+import threading
 import time
 
 from . import github, notion, railway
@@ -25,7 +26,8 @@ TTL = 600  # seconds. Long enough not to hit three APIs every single turn,
 
 NOTION_TOPICS = ["job tracker", "skills", "projects", "future os"]
 
-_cache = {"text": "", "at": 0.0}
+_cache = {"text": "", "at": 0.0, "busy": False}
+_lock = threading.Lock()
 
 
 def _github_lines():
@@ -99,18 +101,54 @@ def build():
     return "\n\n".join(sections)
 
 
-def summary(refresh=False):
-    """The cached snapshot text, rebuilt at most once per TTL.
+def _rebuild():
+    try:
+        text = build()
+    except Exception:                                       # noqa: BLE001
+        return
+    _cache["text"] = text
+    _cache["at"] = time.time()
 
-    Never raises. A connector timing out must not take the system prompt
-    down with it — worst case this hands back what it built last time, or
-    an empty string on the very first call.
-    """
-    now = time.time()
-    if refresh or now - _cache["at"] > TTL:
+
+def _kick():
+    """Refresh in the background, at most one refresh in flight."""
+    with _lock:
+        if _cache["busy"]:
+            return
+        _cache["busy"] = True
+
+    def work():
         try:
-            _cache["text"] = build()
-        except Exception:                                       # noqa: BLE001
-            pass
-        _cache["at"] = now
+            _rebuild()
+        finally:
+            with _lock:
+                _cache["busy"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def summary(refresh=False):
+    """The cached snapshot text. Never blocks on the network, never raises.
+
+    A stale cache hands back what it has and refreshes behind the turn. This
+    matters more than it sounds: summary() is called while building the
+    system prompt, which is on the path of every single question, so
+    rebuilding it inline put three API round trips between him asking and
+    her starting to think — on top of the model call itself. Answering from
+    a snapshot that is a few minutes old beats making him wait for a fresh
+    one, every time.
+
+    refresh=True is the synchronous version, for the warm-up at boot.
+    """
+    if refresh:
+        _rebuild()
+        return _cache["text"]
+    if time.time() - _cache["at"] > TTL:
+        _kick()
     return _cache["text"]
+
+
+def warm():
+    """Fill the cache at startup so the first question is not the one that
+    pays for it."""
+    _kick()

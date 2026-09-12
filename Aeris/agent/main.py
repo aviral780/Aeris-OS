@@ -145,6 +145,25 @@ def _resolve_followup(question, v):
     }
 
 
+# Tools whose result is worth handing back to the model to be phrased. These
+# two return raw material — file extracts, web results — that genuinely needs
+# summarising. Everything else already returns a finished sentence.
+PHRASE_WORTH_IT = {"search_brain", "research_web"}
+
+# Tools that ARE the answer: they reach a real service and come back with his
+# real numbers, phrased in his register by the tool itself. When the question
+# names one of these unmistakably ("is anything down", "show me my job
+# tracker"), going via the model first costs two CLI round trips — thirty
+# seconds or more — to arrive at the same call this makes directly.
+#
+# search_brain is deliberately absent: deciding that a question is about his
+# files is exactly the judgement a model is better at than a regex, and
+# getting it wrong means answering "nothing in your files" to something that
+# was never about his files.
+FAST_TOOLS = {"check_deploys", "check_repos", "search_notion", "read_inbox",
+              "brief_me", "plan_day"}
+
+
 def _model_turn(v, question, route_hint):
     """Let the model choose and phrase. Returns None if it is unavailable."""
     st = llm.probe()
@@ -164,17 +183,25 @@ def _model_turn(v, question, route_hint):
         return {"error": err}
     if tool and tool["name"] in tools.REGISTRY:
         result = tools.run(tool["name"], v, tool.get("args") or {})
-        phrase = llm.call(
-            system,
-            messages + [
-                {"role": "assistant", "content": "[used %s]" % tool["name"]},
-                {"role": "user", "content":
-                    "Tool result. Spoken draft: %s\nCard summary: %s\n\n"
-                    "Say the headline in one or two sentences, out loud, in your voice. "
-                    "Do not read the card. Do not repeat the draft word for word."
-                    % (result["spoken"], json.dumps(result["card"])[:1800])}],
-            tools=None, max_tokens=220)[0]
-        spoken = phrase or result["spoken"]
+        spoken = result["spoken"]
+        # Only pay for a second round trip where it buys something. A
+        # connector tool already returns a finished line with his real
+        # numbers in it — sending that to the model to be reworded cost a
+        # whole extra CLI invocation, which on the claude CLI is most of the
+        # wait, and came back saying the same thing in more words. Synthesis
+        # is worth it over file contents and web results, and nowhere else.
+        if tool["name"] in PHRASE_WORTH_IT:
+            phrase = llm.call(
+                system,
+                messages + [
+                    {"role": "assistant", "content": "[used %s]" % tool["name"]},
+                    {"role": "user", "content":
+                        "Tool result. Spoken draft: %s\nCard summary: %s\n\n"
+                        "Say the headline in one or two sentences, out loud, in your voice. "
+                        "Do not read the card. Do not repeat the draft word for word."
+                        % (result["spoken"], json.dumps(result["card"])[:1800])}],
+                tools=None, max_tokens=220)[0]
+            spoken = phrase or result["spoken"]
         if result.get("receipt") and result["receipt"].split(":")[0] not in spoken:
             spoken = result["spoken"]          # a memory write is never paraphrased away
         return {"spoken": spoken, "card": result["card"], "tool": tool["name"],
@@ -206,16 +233,36 @@ def handle_turn(question):
                 "focus": follow.get("focus"), "by": "context",
                 "route": "resolved against the last card", "degraded": False}
 
-    # 2. the model, if there is one
+    # 2. An unmistakable cue for a tool that is its own answer. Straight to
+    #    the connector, no model in the loop — this is the difference between
+    #    a question about his deploys taking one API call and taking two
+    #    claude CLI invocations on top of it.
+    decision = llm.route(question, list(STATE["history"]), v)
+    if (decision["mode"] == "tool" and decision["tool"] in FAST_TOOLS
+            and decision["confidence"] >= 0.8):
+        result = tools.run(decision["tool"], v, decision["args"])
+        out = {"spoken": result["spoken"], "card": result["card"],
+               "tool": decision["tool"], "by": "direct",
+               "route": decision["why"] + " — answered straight from the connector"}
+        out["spoken"] = llm.polish(out["spoken"], turn)
+        out["degraded"] = False
+        with STATE["lock"]:
+            STATE["history"].append({"role": "user", "content": question})
+            STATE["history"].append({"role": "assistant", "content": out["spoken"]})
+            if out.get("card"):
+                STATE["last_card"] = out["card"]
+                STATE["last_tool"] = out["tool"]
+        return out
+
+    # 3. the model, if there is one
     model_error = None
     out = _model_turn(v, question, None)
     if out and "error" in out:
         model_error = out["error"]
         out = None
 
-    # 3. no model: score the question against the files and say so
+    # 4. no model: score the question against the files and say so
     if out is None:
-        decision = llm.route(question, list(STATE["history"]), v)
         if decision["mode"] == "tool":
             result = tools.run(decision["tool"], v, decision["args"])
             out = {"spoken": result["spoken"], "card": result["card"],
@@ -591,6 +638,10 @@ def main():
               % (type(exc).__name__, exc))
         print("  Starting anyway — /api/status will show the same detail once "
               "she's up.\n")
+
+    # Build the connector snapshot now, in the background, so the first
+    # question of the session is not the one that waits for three APIs.
+    briefing.warm()
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True

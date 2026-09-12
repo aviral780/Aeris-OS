@@ -16,6 +16,7 @@ Usage is metered here too. ElevenLabs is a paid service, so there is a
 per-process character budget and a per-request cap; hitting either stops the
 call rather than quietly spending more of Aviral's credit.
 """
+import difflib
 import json
 import mimetypes
 import os
@@ -354,6 +355,75 @@ def _multipart(fields, files):
     return bytes(out), "multipart/form-data; boundary=%s" % boundary
 
 
+# A transcript is judged only word by word against this, never rewritten
+# wholesale — a whole misheard sentence ("dread" for "railway" on a bad mic
+# take) has no fix here; that is a recording-quality or model-size problem,
+# not a text one. What this catches is the *close* miss: a name the model
+# almost got, which is by far the more common failure once the audio itself
+# is intelligible at all.
+# Only non-words and split-in-two names belong here. A real English word is
+# never mapped, however plausible the confusion sounds: "motion" for "notion"
+# and "ocean" for "notion" both happen, and both are words he may well have
+# meant, so silently rewriting them would put questions in his mouth.
+_VOCAB_FIXES = {
+    "get hub": "github", "githib": "github",
+    "note ion": "notion", "notyon": "notion", "notin": "notion",
+    "calender": "calendar",
+    "jimmail": "gmail", "gee mail": "gmail", "g mail": "gmail",
+    "scan shield": "scamshield", "scam field": "scamshield",
+    "true ai": "truvai", "true vi": "truvai",
+    "fino tech": "fuinnotech", "finno tech": "fuinnotech",
+}
+
+# What the fuzzy pass is allowed to reach for. "notion", "calendar" and
+# "aeris" are deliberately absent: each sits in a crowd of real English
+# words — nation, notions, calendars, arise, aerials — and correcting
+# towards them rewrites speech he meant. Their known mishearings are named
+# in the table above instead, where there is nothing to guess at. ("aeris"
+# needs no entry at all: WAKE_WORDS below already carries every shape the
+# name comes back as, which is the only place it has to be recognised.)
+_VOCAB_WORDS = ("railway", "github", "gmail", "scamshield", "fuinnotech", "truvai")
+
+# 0.80, a shared first letter, and plurals left alone. The first version ran
+# at 0.72 with no letter check and turned "read me the last three emails"
+# into "...three gmail" — four shared letters out of eleven is similarity
+# enough to clear a loose bar. A transcriber that loses the leading consonant
+# has not produced a near miss worth patching.
+_VOCAB_CUTOFF = 0.80
+
+
+def _correct_vocabulary(text):
+    """Nudge a transcript's near-misses back to the project's own vocabulary.
+
+    Two passes: fixed substitutions for confusions common enough to name
+    outright, then a deliberately narrow per-word fuzzy match. Nothing here
+    tries to rescue a wholly misheard word — that is a microphone or
+    model-size problem, and guessing at it from text would invent questions
+    he never asked.
+    """
+    if not text:
+        return text
+    for wrong, right in _VOCAB_FIXES.items():
+        text = re.sub(r"\b%s\b" % re.escape(wrong), right, text, flags=re.I)
+
+    def fix_word(m):
+        word = m.group(0)
+        if len(word) < 4:
+            return word
+        low = word.lower()
+        best = difflib.get_close_matches(low, _VOCAB_WORDS, n=1, cutoff=_VOCAB_CUTOFF)
+        if not best or best[0] == low or best[0][0] != low[0]:
+            return word
+        if low == best[0] + "s":                  # a plural, not a mishearing
+            return word
+        canon = best[0]
+        if word.isupper():
+            return canon.upper()
+        return canon.capitalize() if word[0].isupper() else canon
+
+    return re.sub(r"[A-Za-z']+", fix_word, text)
+
+
 def transcribe(audio, content_type="audio/webm"):
     """Return (transcript, error). Never raises."""
     if not audio:
@@ -365,7 +435,8 @@ def transcribe(audio, content_type="audio/webm"):
     if not chosen["ok"]:
         return None, chosen["detail"]
     if chosen["name"] == "whisper":
-        return _stt_whisper(audio, content_type)
+        text, err = _stt_whisper(audio, content_type)
+        return (_correct_vocabulary(text) if text else text), err
 
     if not configured():
         return None, ("No ElevenLabs key is set, so speech-to-text is unavailable. "
@@ -401,7 +472,7 @@ def transcribe(audio, content_type="audio/webm"):
     _spent["stt_seconds"] += time.time() - started
     if not text:
         return "", None          # silence is a valid answer, not an error
-    return text, None
+    return _correct_vocabulary(text), None
 
 
 # --------------------------------------------------------------------------
@@ -555,12 +626,43 @@ def set_voice(new_id):
 # --------------------------------------------------------------------------
 
 def check():
-    """`python3 -m agent.voice` — verify the key without guessing."""
+    """`python3 -m agent.voice` — what is actually chosen, and why.
+
+    This used to check the ElevenLabs key and nothing else, and returned
+    early when there wasn't one — so the two questions that actually come up
+    ("why is it still using ElevenLabs when I installed whisper", "why does
+    the wake word do nothing") had no answer anywhere in the terminal. Both
+    are decided below, before the key is looked at.
+    """
     print("Aeris voice check")
+    print("  AERIS_STT : %s" % (data.env("AERIS_STT", "auto").strip() or "auto"))
+
+    binary, model, ffmpeg = _whisper_bin(), _whisper_model(), shutil.which("ffmpeg")
+    print("  whisper   : %s" % (binary or "\033[93mnot found\033[0m — brew install whisper-cpp"))
+    print("  model     : %s" % (model or "\033[93mWHISPER_MODEL not set\033[0m — "
+                                "point it at a downloaded ggml file"))
+    if model and not os.path.isfile(os.path.expanduser(model)):
+        print("              \033[93mthat path does not exist\033[0m")
+    print("  ffmpeg    : %s" % (ffmpeg or "\033[93mnot found\033[0m — brew install ffmpeg"))
+
+    chosen = stt_backend()
+    print("  speech in : \033[96m%s\033[0m — %s" % (chosen["name"], chosen["detail"]))
+
+    ready = wake_ready()
+    if ready["ok"]:
+        print("  wake word : \033[92m\"%s\" — armed\033[0m" % wake_word())
+    else:
+        print("  wake word : \033[93mCANNOT RUN (%s)\033[0m" % ready["reason"])
+        print("              %s" % ready["detail"])
+        if ready["reason"] == "metered":
+            print("              Everything above marked 'not found' is why. Wake mode "
+                  "needs the local route; it will switch itself on once it exists.")
+
     key = _key()
     if not key:
-        print("  key       : MISSING — add ELEVENLABS_API_KEY to Aeris/.env")
-        return 1
+        print("  key       : no ELEVENLABS_API_KEY — that is fine if whisper is set up "
+              "above, since local speech is free")
+        return 0 if chosen["ok"] else 1
     print("  key       : set (%s…%s)" % (key[:6], key[-4:]))
     print("  voice id  : %s" % voice_id())
     print("  tts model : %s" % data.env("ELEVENLABS_TTS_MODEL", "eleven_turbo_v2_5"))

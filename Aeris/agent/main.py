@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import actions, agents, data, github, google, llm, memory, notion, railway
+from . import actions, agents, briefing, data, github, google, llm, memory, notion, railway
 from . import tools, voice
 from . import vault as vault_mod
 
@@ -67,6 +67,25 @@ def system_prompt(v, question=""):
     mems = memory.as_context(question=question)
     if mems:
         parts.append("\n\n# What you remember that bears on this\n\n" + mems)
+    brief = briefing.summary()
+    if brief:
+        parts.append(
+            "\n\n# What's already loaded about his real work (refreshed every "
+            "few minutes — call the matching tool instead of this for anything "
+            "live, detailed, or if he asks you to check again)\n\n" + brief)
+    # Observed live: with a model connected and an empty vault, "what am I
+    # working on" still went to search_brain and came back with nothing. The
+    # model cannot know his notes are empty unless it is told, and a count it
+    # has to interpret is not the same as being told what to do about it.
+    if not data.is_demo() and len(v.notes) < 25:
+        parts.append(
+            "\n\n# His files are not where the answer is\n\n"
+            "He has %d documents indexed. Searching them is almost always the "
+            "wrong move for a question about his work, because the answer is "
+            "not in there — his real record is GitHub (check_repos), Railway "
+            "(check_deploys), Notion (search_notion) and his mail "
+            "(read_inbox). Use those. Only use search_brain when he refers to "
+            "something he actually wrote down.\n" % len(v.notes))
     parts.append(
         "\n\n# The state of his files right now\n\n"
         "- mode: %s\n- documents indexed: %d\n- links between them: %d\n- types: %s\n"

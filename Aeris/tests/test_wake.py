@@ -58,6 +58,48 @@ class WakeMatchTest(unittest.TestCase):
         self.assertEqual(command, "open the Scam Detection Platform")
 
 
+class VocabularyCorrectionTest(unittest.TestCase):
+    """A transcript is the only thing routing ever sees, so a name the
+    transcriber almost got is a question that reaches the wrong tool — or no
+    tool at all. This pass fixes the close misses and, deliberately, nothing
+    more: a wholly misheard word is a recording problem, and guessing at it
+    from text would invent questions he never asked.
+    """
+    def test_a_near_miss_on_a_project_name_is_corrected(self):
+        self.assertEqual(voice._correct_vocabulary("is railwey down"), "is railway down")
+
+    def test_a_two_word_mishearing_is_rejoined(self):
+        self.assertIn("github", voice._correct_vocabulary("what's failing on get hub").lower())
+
+    def test_casing_survives_a_correction(self):
+        self.assertEqual(voice._correct_vocabulary("Railwey has my deploys"),
+                         "Railway has my deploys")
+
+    def test_a_named_mishearing_of_an_english_adjacent_word_is_fixed(self):
+        """"notion" cannot go in the fuzzy pass — it sits next to nation and
+        notions — so its mishearings are named outright instead."""
+        self.assertEqual(voice._correct_vocabulary("what is in notyon"),
+                         "what is in notion")
+
+    def test_ordinary_speech_is_left_alone(self):
+        for line in ("what did I write about pricing",
+                     "the client wants a call tomorrow",
+                     "read me the last three emails",
+                     "a nation of two hundred million",
+                     "put it in motion this week",
+                     "check my calendars and my notions",
+                     "what am I working on"):
+            self.assertEqual(voice._correct_vocabulary(line), line)
+
+    def test_short_words_are_never_rewritten(self):
+        """'ai', 'my', 'is' are within a letter or two of plenty of things."""
+        self.assertEqual(voice._correct_vocabulary("is my ai on"), "is my ai on")
+
+    def test_an_empty_transcript_stays_empty(self):
+        self.assertEqual(voice._correct_vocabulary(""), "")
+        self.assertIsNone(voice._correct_vocabulary(None))
+
+
 class WakeReadinessTest(unittest.TestCase):
     def setUp(self):
         self._real = voice.stt_backend

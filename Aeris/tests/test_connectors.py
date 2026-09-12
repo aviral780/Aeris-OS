@@ -207,6 +207,35 @@ class NotionTest(unittest.TestCase):
             os.environ.pop("NOTION_TOKEN", None)
             data.reload_env()
 
+    def test_a_notion_question_arrives_with_a_query_not_an_empty_string(self):
+        """The bug this pins: the router matched search_notion and then
+        called it with no arguments at all, so notion.search ran with an
+        empty query and answered with whatever Notion happened to return
+        first. Asking for the job tracker got the most recently edited page
+        instead, which reads exactly like Notion being broken.
+        """
+        from agent import llm
+
+        class StubVault:
+            def search(self, *a, **k):
+                return []
+
+        for question, expected in (
+            ("show me my job tracker", "job tracker"),
+            ("what are my projects", "projects"),
+            ("what are my skills", "skills"),
+        ):
+            decision = llm.route(question, [], StubVault())
+            self.assertEqual(decision["tool"], "search_notion", question)
+            self.assertEqual(decision["args"].get("query"), expected, question)
+
+    def test_a_question_with_no_topic_left_falls_back_to_recent_pages(self):
+        """"what is in my notion" is every page, not a page named 'notion' —
+        an empty query is Notion's own most-recent ordering, which is the
+        right answer to a question that names no topic."""
+        from agent import llm
+        self.assertEqual(llm._notion_query("what is in my notion"), "")
+
     def test_a_403_explains_that_sharing_is_the_missing_step(self):
         """Notion shows an integration nothing until pages are shared with it,
         and 'no results' would read as an empty workspace."""

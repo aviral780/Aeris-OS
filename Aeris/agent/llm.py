@@ -16,6 +16,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 
@@ -510,6 +511,8 @@ def route(question, history, vault):
             elif name == "remember":
                 args = {"fact": _strip_cue(q, r"\b(remember|note|save|store|log|keep in mind|"
                                               r"don'?t forget|make a note)( that| this)?\b")}
+            elif name == "search_notion":
+                args = {"query": _notion_query(q)}
             return {"mode": "tool", "tool": name, "args": args,
                     "why": "explicit cue for %s" % name, "confidence": 0.85}
 
@@ -547,6 +550,30 @@ def _strip_cue(text, pattern):
     out = re.sub(r"^\s*(for|about|on|me|my|the|that|this|to|in)\b\s*", " ", out, flags=re.I)
     out = re.sub(r"\s+", " ", out).strip(" ?.,!:")
     return out or text
+
+
+# Meta-vocabulary about the tool itself, not content worth searching for.
+# "what is in my notion" has no topic left once these are gone, and that is
+# the signal to fall back to an empty query (Notion's own "most recent"
+# ordering) rather than sending Notion a sentence it will never match.
+_NOTION_STOP = re.compile(
+    r"\b(show me|pull up|what'?s|what is|what are|which|do i have|in my|on my"
+    r"|my|the|notion|workspace)\b", re.I)
+
+
+def _notion_query(text):
+    """The words worth sending to Notion's search, not the whole question.
+
+    Notion's `/search` matches page titles fairly literally, so "job tracker"
+    finds a page titled Job Tracker and "show me my job tracker" mostly does
+    not — the sentence noise around the topic has to go. This was previously
+    not extracted at all: search_notion matched via TOOL_CUES but ran with
+    an empty query, so the "closest" page was whatever Notion happened to
+    return first rather than the thing actually asked for.
+    """
+    out = _NOTION_STOP.sub(" ", text)
+    out = re.sub(r"\s+", " ", out).strip(" ?.,!:")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -674,3 +701,51 @@ def polish(text, turn=0):
 
 def four_word_unknown():
     return "I don't know, SIR."
+
+
+# --------------------------------------------------------------------------
+
+def check():
+    """`python3 -m agent.llm` — prove a real model is reachable before
+    wondering why every answer sounds like a template.
+
+    Every "I don't know, SIR" is the honest scoring path talking, and it
+    only runs when this comes back empty. There was no way to check that
+    from the terminal the same way railway.py and notion.py let you check
+    their connectors — this closes that gap.
+    """
+    print("Aeris — model check")
+    want = data.env("AERIS_LLM", "auto").strip().lower()
+    print("  AERIS_LLM  %s" % want)
+    info = backends(refresh=True)
+    for name in ("ollama", "claude_cli", "anthropic"):
+        if name in info["found"]:
+            b = info["found"][name]
+            print("  %-10s \033[92mOK\033[0m — %s%s" % (
+                name, b.get("model") or "", " (%s)" % b["detail"] if b.get("detail") else ""))
+        elif name in info["why"]:
+            print("  %-10s \033[93munreachable\033[0m — %s" % (name, info["why"][name]))
+        else:
+            print("  %-10s not tried (AERIS_LLM=%s excludes it)" % (name, want))
+
+    if not info["found"]:
+        print("\n  \033[91mNothing is reachable.\033[0m Every question is being answered by "
+              "file-scoring templates, not a model — that is the 'I don't know, SIR' you are "
+              "hearing for things a model would otherwise just answer.")
+        print("  Fastest fix: the claude CLI, since it runs on your subscription for free.")
+        print("    which claude          # confirm it's on PATH for this shell")
+        print("    claude --version      # confirm it actually runs")
+        print("  If it works in a normal terminal but not here, Aeris's server was probably "
+              "started from a shell (or launchd/cron) with a different PATH than your login "
+              "shell — start it from the same terminal where `claude` works.")
+        return 1
+
+    fast, deep = for_tier("fast"), for_tier("deep")
+    print("\n  fast tier  -> %s" % (fast["backend"] if fast else "none"))
+    print("  deep tier  -> %s" % (deep["backend"] if deep else "none"))
+    print("\nWorking. Ask her something that isn't in your files — a model should answer it.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(check())
